@@ -41,7 +41,7 @@ A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and gen
 
 | Software Parameter | Hardware Parameter (`SystemVerilog Macro`) | Mathematical Conversion / Logic |
 | :--- | :--- | :--- |
-| `reram_size` | `RRAM_ROW_ADDR_WIDTH` | $\lceil \log_2(reram\_size) \rceil$ |
+| `reram_size` | `RRAM_ROW_ADDR_WIDTH` | $\lceil \log_2(\mathrm{reram\_size}) \rceil$ |
 | `num_classes` | `CLASS_LABEL_WIDTH` | $\lceil \log_2(\text{num\_classes}) \rceil$ |
 | `hd_dim` / Spatial Dims | `HV_SEG_WIDTH` | Derivation based on PE array sizing |
 | *Derived Internally* | `WEIGHT_BUS_WIDTH` | $\text{WEIGHT\_MEM\_DATA\_WIDTH} \times \text{NUM\_RF\_BANK}$ |
