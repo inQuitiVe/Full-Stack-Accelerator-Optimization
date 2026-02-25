@@ -11,8 +11,6 @@ This project aims to build an automated, closed-loop Design Space Exploration (D
 ---
 
 ## 2. Multi-Fidelity Evaluation Pipeline
-
-
 To overcome the evaluation bottleneck, the framework employs a three-tiered pipeline. This structure progressively evaluates designs from low to high fidelity, utilizing **Early Stopping (Gatekeeping)** mechanisms to discard sub-optimal configurations early and save compute time.
 
 ### 2.1 Path 1: Fast Software Simulation (1-min scale)
@@ -20,17 +18,17 @@ To overcome the evaluation bottleneck, the framework employs a three-tiered pipe
 * **Engine:** Python-based simulator adapted from the existing `HDnn-PIM-Opt/sim` repository. A standardized Python adapter (`Path1Evaluator`) wraps the existing simulator to decouple argument parsing and enable direct dictionary/kwargs injection.
 * **Evaluation Metrics:**
   * **Accuracy:** Golden model accuracy.
-  * **Energy:** $Unit Cost \times \#OPS$
-  * **Time:** $Clock Period \times \#OPS$
-  * **Area:** $\sum Datapath Component$
-* **Gatekeeping (Gate 1):** If the estimated accuracy falls below a acceptable threshold or area exceeds constraints, the configuration is immediately discarded.
+  * **Energy:** $\text{Unit Cost} \times N_{\text{OPS}}$
+  * **Time:** $\text{Clock Period} \times N_{\text{OPS}}$
+  * **Area:** $\sum \text{Datapath Components}$
+* **Gatekeeping (Gate 1):** If the estimated accuracy falls below an acceptable threshold or area exceeds constraints, the configuration is immediately discarded.
 
 ### 2.2 Path 2: Hardware Synthesis (10-min scale)
 * **Purpose:** Medium-fidelity evaluation to obtain accurate post-synthesis area and timing metrics.
 * **Engine:** Synopsys Design Compiler (DC Synth).
 * **Evaluation Metrics:**
-  * **Area:** $\sum Component Area$ (Accurate gate-level area considering optimization and resource sharing).
-  * **Timing:** $Clock Period$ (Accurate critical path delay).
+  * **Area:** $\sum \text{Component Area}$ (Accurate gate-level area considering optimization and resource sharing).
+  * **Timing:** $\text{Clock Period}$ (Accurate critical path delay).
   * **Power:** Unit Power (Note: Provides accurate Static/Leakage power; Dynamic power is estimated based on default toggle rates and serves only as a relative trend).
 * **Gatekeeping (Gate 2):** If the synthesized netlist fails to meet the target Clock Period (Timing Violation), the design is discarded, preventing unnecessary simulation.
 
@@ -39,8 +37,8 @@ To overcome the evaluation bottleneck, the framework employs a three-tiered pipe
 * **Engine:** Synopsys VCS + PrimeTime PX (PtPX).
 * **Workflow:** VCS runs the synthesized netlist against configuration-aware testbenches to generate accurate switching activity files (SAIF/FSDB). These activity files are then fed into PtPX (or DC) to calculate exact dynamic power.
 * **Evaluation Metrics:**
-  * **Time:** $Period \times \# Exec Cycles$
-  * **Energy:** $Unit Power \times Time$
+  * **Time:** $\text{Period} \times N_{\text{Exec Cycles}}$
+  * **Energy:** $\text{Unit Power} \times \text{Time}$
 
 ---
 
@@ -67,7 +65,6 @@ A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and gen
 ---
 
 ## 4. Automation & Remote Execution Infrastructure
-
 
 Due to strict EDA tool licensing constraints, local execution of Path 2/3 is not possible. The framework implements a localized Client-Server architecture.
 
