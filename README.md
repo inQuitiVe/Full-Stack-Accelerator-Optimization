@@ -83,7 +83,23 @@ Due to strict EDA tool licensing constraints, local execution of Path 2/3 is not
 
 ---
 
-## 5. Future Iterations & Pending Action Items
-* **[TBD] Path 1 I/O Mapping:** Define the exact input arguments (software/hardware parameters) and standardize the output metric formats of the existing `HDnn-PIM-Opt` software simulator.
-* **[TBD] Translation Script (`yaml_to_svh.py`):** Finalize the script once Path 1 parameters are fully mapped to ensure cross-path consistency.
-* **[Future] Cross-Path Calibration:** Implement a feedback loop where physical hardware metrics from Path 2 and Path 3 are used to calibrate the analytical models (Unit Cost, Clock Period estimations) in Path 1, minimizing Correlation Mismatch.
+## 5. Pre-Implementation Research & Pending Action Items
+Before writing the core automation scripts, the following research and planning tasks must be completed to ensure a smooth and bug-free integration phase. This acts as our immediate To-Do list:
+
+### 5.1 Path 1: Software Simulator (`HDnn-PIM-Opt`) Profiling
+- [ ] **Input Parameter Mapping:** Identify the exact Python variables/arguments in the `sim` folder that correspond to our Tunable Hardware Parameters (e.g., mapping YAML's `hv_seg_width` to the script's internal variable).
+- [ ] **Output Metric Standardization:** Determine how the current simulator outputs Accuracy, Area, Power, and Timing. Plan the modifications needed to make it return a standard Python dictionary instead of `print()` statements.
+- [ ] **Headless Execution:** Ensure the `sim` code can run entirely in the background. Identify and comment out any GUI triggers, `matplotlib` plotting, or interactive prompts.
+
+### 5.2 Path 2/3: EDA Automation & Log Parsing Strategy
+- [ ] **EDA Script Standardization:** Draft the exact `Makefile` or Tcl scripts needed to run Design Compiler and VCS strictly from the command line (batch mode, no GUI).
+- [ ] **Log File Identification (Crucial):** Run a manual DC and VCS flow *once*. Identify exactly which `.rpt` or `.log` files contain the Critical Path Slack, Total Area, and Power numbers so we know where to point our regex parsers.
+- [ ] **Power Analysis Flow Pipeline:** Research and map out the exact command sequence to take the VCS simulation output (SAIF/FSDB file) and feed it into PrimeTime PX (PtPX) or DC to get the accurate dynamic power.
+
+### 5.3 Infrastructure: Translation Layer & Remote Communication
+- [ ] **Derived Parameter Math (`yaml_to_svh.py`):** Document the exact mathematical formulas needed for all Category C parameters (e.g., how to implement `$clog2` correctly in Python).
+- [ ] **Socket Payload Schema:** Define the exact JSON structure that will be sent from the Local Client to the Remote Server (e.g., `{ "job_id": 123, "config_yaml": "..." }`), and the expected format for the return payload.
+- [ ] **Timeout & Error Handling:** Plan how the local script should react if the remote EDA tool hangs, crashes, or fails due to license unavailability.
+
+### 5.4 Algorithm Preparation: Bounding the Design Space
+- [ ] **Define Parameter Constraints:** For every parameter in Category B, explicitly define the absolute Minimum, Maximum, and valid Step Size (e.g., must be a power of 2, or must be an even number). This is essential to prevent the future Bayesian Optimization algorithm from generating mathematically impossible hardware geometries.
