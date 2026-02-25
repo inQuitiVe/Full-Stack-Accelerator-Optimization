@@ -7,12 +7,16 @@ Responsibilities:
   - Run json_to_svh.py -> make synth -> parse_dc.py entirely on-server.
   - Return a compact JSON result dict; never transfer .rpt or .fsdb files.
   - Support a Polling protocol so Client does not need a long-lived TCP connection.
+  - (Path 3) Accept optional hex_data payload and write to hardware/data/
+    before running make sim → VCS gate-level simulation.
 
 Protocol (all messages newline-delimited JSON):
-  Submit:  {"action": "submit",  "job_id": <int>, "params": {...}}
-  Poll:    {"action": "status",  "job_id": <int>}
-  Reply:   {"job_id": <int>, "status": "accepted"|"queued"|"running"|"success"|"error"|"timeout",
-            "metrics": {...} | "reason": "..."}
+  Submit (Path 2): {"action": "submit",  "job_id": <int>, "params": {...}}
+  Submit (Path 3): {"action": "submit",  "job_id": <int>, "params": {...},
+                    "hex_data": {"inputs": "...", "labels": "...", "weights": "..."}}
+  Poll:            {"action": "status",  "job_id": <int>}
+  Reply:           {"job_id": <int>, "status": "accepted"|"queued"|"running"|"success"|"error"|"timeout",
+                    "metrics": {...} | "reason": "..."}
 """
 
 from __future__ import annotations
@@ -53,13 +57,44 @@ registry_lock = threading.Lock()
 
 # ── Worker Thread ─────────────────────────────────────────────────────────────
 
-def _run_synthesis(job_id: int, params: Dict[str, Any]) -> None:
-    """Called from the worker thread: translate params, run DC, parse results."""
+def _write_hex_data(hex_data: Dict[str, str]) -> None:
+    """
+    Write hex data strings (from the Client JSON payload) to the server's
+    hardware/data/ directory so the VCS Testbench can read them via $readmemh.
+
+    Expected keys: "inputs", "labels", "weights".
+    Missing keys are silently skipped (allows partial updates).
+    """
+    data_dir = MAKEFILE_DIR / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    file_map = {
+        "inputs":  data_dir / "inputs.hex",
+        "labels":  data_dir / "labels.hex",
+        "weights": data_dir / "weights.hex",
+    }
+    for key, path in file_map.items():
+        if key in hex_data and hex_data[key]:
+            path.write_text(hex_data[key], encoding="utf-8")
+            logger.info(f"[hex_data] Written {path.name} ({len(hex_data[key])} chars)")
+
+
+def _run_synthesis(job_id: int, params: Dict[str, Any], hex_data: Optional[Dict[str, str]] = None) -> None:
+    """
+    Called from the worker thread: translate params, run DC synthesis, parse results.
+    When hex_data is provided (Path 3), also runs VCS gate-level simulation.
+    """
     _set_status(job_id, "running")
-    logger.info(f"[Job {job_id}] Starting synthesis with params: {params}")
+    is_path3 = hex_data is not None
+    logger.info(f"[Job {job_id}] Starting {'Path 3 (sim)' if is_path3 else 'Path 2 (synth)'} with params: {params}")
 
     try:
-        # Step 1: Translate JSON params → config_macros.svh + patch TCL clock
+        # Step 0 (Path 3 only): Write hex data to hardware/data/ before translation
+        if is_path3:
+            _write_hex_data(hex_data)
+            logger.info(f"[Job {job_id}] Hex data written to hardware/data/.")
+
+        # Step 1: Translate JSON params → config_macros.svh + synth.tcl + tb_macros.svh
         json_to_svh_script = WORK_DIR / "json_to_svh.py"
         translate_result = subprocess.run(
             ["python", str(json_to_svh_script)],
@@ -91,19 +126,65 @@ def _run_synthesis(job_id: int, params: Dict[str, Any]) -> None:
 
         # Step 3: Parse DC report files
         metrics = parse_dc_reports(str(REPORTS_DIR))
-        logger.info(f"[Job {job_id}] Parsed metrics: {metrics}")
+        logger.info(f"[Job {job_id}] Parsed DC metrics: {metrics}")
 
         # Step 4: Gate 2 — check timing
         if metrics.get("timing_slack_ns", 0.0) < 0.0:
             _set_status(job_id, "timing_violated", metrics=metrics)
             logger.warning(f"[Job {job_id}] Timing VIOLATED (slack={metrics['timing_slack_ns']:.3f} ns).")
-        else:
+            return  # do not proceed to simulation if timing is violated
+
+        if not is_path3:
+            # Path 2: synthesis metrics are the final result
             _set_status(job_id, "success", metrics=metrics)
-            logger.info(f"[Job {job_id}] Success.")
+            logger.info(f"[Job {job_id}] Path 2 success.")
+            return
+
+        # ── Path 3: Gate-Level Simulation ────────────────────────────────────
+        logger.info(f"[Job {job_id}] Starting gate-level simulation (VCS).")
+        sim_result = subprocess.run(
+            ["make", "sim"],
+            cwd=str(MAKEFILE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=SYNTH_TIMEOUT_SECONDS,
+        )
+        if sim_result.returncode != 0:
+            raise RuntimeError(
+                f"make sim failed (exit {sim_result.returncode}):\n"
+                f"{sim_result.stderr[-2000:]}"
+            )
+        logger.info(f"[Job {job_id}] VCS simulation complete.")
+
+        # Step 5: Run PrimeTime PX for dynamic power
+        logger.info(f"[Job {job_id}] Starting PtPX power analysis.")
+        power_result = subprocess.run(
+            ["make", "power"],
+            cwd=str(MAKEFILE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=SYNTH_TIMEOUT_SECONDS,
+        )
+        if power_result.returncode != 0:
+            raise RuntimeError(
+                f"make power failed (exit {power_result.returncode}):\n"
+                f"{power_result.stderr[-2000:]}"
+            )
+        logger.info(f"[Job {job_id}] PtPX power analysis complete.")
+
+        # Step 6: Parse VCS + PtPX reports
+        from parsers.parse_vcs import parse_vcs_reports
+        vcs_metrics = parse_vcs_reports(str(REPORTS_DIR))
+        logger.info(f"[Job {job_id}] Parsed VCS/PtPX metrics: {vcs_metrics}")
+
+        # Merge: Path 3 upgrades power and adds cycle count; keeps area from DC
+        combined_metrics = {**metrics, **vcs_metrics}
+        _set_status(job_id, "success", metrics=combined_metrics)
+        logger.info(f"[Job {job_id}] Path 3 success.")
 
     except subprocess.TimeoutExpired:
-        logger.error(f"[Job {job_id}] Synthesis timed out after {SYNTH_TIMEOUT_SECONDS}s.")
-        _set_status(job_id, "timeout", reason=f"Synthesis exceeded {SYNTH_TIMEOUT_SECONDS}s hard limit.")
+        logger.error(f"[Job {job_id}] Timed out after {SYNTH_TIMEOUT_SECONDS}s.")
+        _set_status(job_id, "timeout", reason=f"Exceeded {SYNTH_TIMEOUT_SECONDS}s hard limit.")
     except Exception as exc:
         logger.error(f"[Job {job_id}] Error: {exc}")
         _set_status(job_id, "error", reason=str(exc))
@@ -129,9 +210,9 @@ def _worker_loop() -> None:
     """Single worker thread: pops jobs from queue and runs synthesis serially."""
     logger.info("Worker thread started — waiting for tasks.")
     while True:
-        job_id, params = task_queue.get()
+        job_id, params, hex_data = task_queue.get()
         try:
-            _run_synthesis(job_id, params)
+            _run_synthesis(job_id, params, hex_data=hex_data)
         finally:
             task_queue.task_done()
 
@@ -141,6 +222,7 @@ def _worker_loop() -> None:
 def _handle_submit(payload: Dict[str, Any]) -> Dict[str, Any]:
     job_id: int = payload.get("job_id", int(uuid.uuid4().int % 1_000_000))
     params: Dict[str, Any] = payload["params"]
+    hex_data: Optional[Dict[str, str]] = payload.get("hex_data")  # None for Path 2
 
     with registry_lock:
         if job_id in job_registry:
@@ -149,10 +231,15 @@ def _handle_submit(payload: Dict[str, Any]) -> Dict[str, Any]:
             "status": "queued",
             "submitted_at": time.time(),
             "updated_at": time.time(),
+            "path3": hex_data is not None,
         }
 
-    task_queue.put((job_id, params))
-    logger.info(f"[Job {job_id}] Accepted and queued (queue depth: {task_queue.qsize()}).")
+    task_queue.put((job_id, params, hex_data))
+    logger.info(
+        f"[Job {job_id}] Accepted and queued "
+        f"({'Path 3 w/ hex_data' if hex_data else 'Path 2 synth only'}, "
+        f"queue depth: {task_queue.qsize()})."
+    )
     return {"job_id": job_id, "status": "accepted"}
 
 

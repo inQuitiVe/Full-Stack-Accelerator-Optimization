@@ -1,7 +1,7 @@
 # Full-Stack Accelerator Optimization Framework
 
 **Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture  
-**Status:** Phase 2 (Baseline Exploration Flow) Implemented
+**Status:** Phase 2 (Baseline Exploration Flow) Implemented | Phase 3 (Verification & EDA DSE) Planning
 
 ---
 
@@ -65,6 +65,7 @@ flowchart TD
 ### 3.1 Path 1: Fast Software Simulation
 * **Engine:** `path1_software.py` (Calls Cimloop + Timeloop)
 * **Gate 1:** If PyTorch accuracy is below the defined constraint, the trial is marked as failed without penalty injection.
+* **Data Prep (Phase 3):** Dumps model weights, inputs, and labels to HEX files for downstream verification.
 
 ### 3.2 Path 2: Hardware Synthesis (Client-Side Stitching)
 * **Engine:** `path2_hardware.py`
@@ -72,6 +73,58 @@ flowchart TD
   * `Total Timing = ASIC Delay (EDA) + RRAM Delay (Cimloop)`
   * `Total Energy = ASIC Power (EDA) * Total Timing + RRAM Energy (Cimloop)`
 * **Gate 2:** If the synthesized netlist violates timing constraints (`slack < 0`), the trial fails.
+
+### 3.3 Path 3: Gate-Level Simulation (Verification)
+* **Engine:** `path2_hardware.py` (with Path 3 flag) calling EDA Server (VCS + PtPX).
+* **Cycle-accurate data:** VCS provides actual execution cycle count, replacing Timeloop's estimate.
+* **Final Energy:** `(asic_dynamic_power_mW * total_time_us) + rram_energy_uJ`
+
+#### Phase 3 Testbench Architecture & Data Flow
+Because the EDA server is a black box, the client must generate the test data dynamically and send it to the server to be read by the Testbench (`tb_top.sv`).
+
+```mermaid
+flowchart TD
+    subgraph Client ["Client (Docker)"]
+        P1[Path 1: PyTorch Model] -->|Dump| H1(inputs.hex)
+        P1 -->|Dump| H2(labels.hex)
+        P1 -->|Dump| H3(weights.hex)
+        
+        SW_Params[YAML: num_tests, frequency] --> JSON[JSON Payload]
+        H1 -.->|Base64 or Text| JSON
+        H2 -.-> JSON
+        H3 -.-> JSON
+    end
+
+    subgraph Server ["EDA Server (VCS + PtPX)"]
+        JSON -->|Extract| S_Data[data/ Directory]
+        JSON -->|Generate| S_Macro[`tb_macros.svh`]
+        
+        S_Macro -->|TB_CLK_PERIOD_NS<br/>TB_NUM_VECTORS| TB[`tb_top.sv`]
+        S_Data -->| $readmemh | TB
+        
+        Netlist[`synth_netlist.v`] --> TB
+        
+        TB -->|Run Simulation| VCS[Synopsys VCS]
+        
+        VCS -->|1. Print| Log[`vcs.log`]
+        VCS -->|2. Dump| SAIF[`activity.saif`]
+        
+        Log -->|Parse| Cycles[Execution Cycles & HW Accuracy]
+        SAIF --> PtPX[PrimeTime PX] --> Power[Exact Dynamic Power]
+    end
+    
+    style TB fill:#d4edda,stroke:#333,stroke-width:2px
+    style Netlist fill:#cce5ff,stroke:#333,stroke-width:2px
+```
+
+**Testbench Parameter Mapping:**
+| Original Parameter (YAML) | Testbench Macro / Parameter | Purpose in TB |
+| :--- | :--- | :--- |
+| `frequency` | `TB_CLK_PERIOD_NS` | Clock generation: `# (TB_CLK_PERIOD_NS / 2.0) clk = ~clk;` |
+| `num_tests` | `TB_NUM_VECTORS` | Loop bounds for reading test vectors |
+| `dataset` | `TB_INPUT_FILE` | Hex file path for input features |
+| (New) | `TB_GOLDEN_FILE` | Hex file path for golden labels (to verify HW accuracy) |
+| (New) | `TB_WEIGHT_FILE` | Hex file path for pre-trained HDnn weights |
 
 ---
 
@@ -119,8 +172,44 @@ Tunable parameters are centrally defined in `workspace/conf/params_prop/cimloop.
 * **Category 2: Training & Dataflow-Related (No RTL Impact)**
   * `dataset`, `frequency`, `hd_epochs`, `cnn_epochs`
   * `cnn` (Fixed flag: true = CNN+HD, false = HD only)
+* **Category 3: Synthesis Strategy (EDA Impact)**
+  * `synth_profile`: Groups DC synthesis flags to explore the trade-off between strict timing and low power/area.
 
-### 5.2 Software-to-RTL Mapping Table
+### 5.2 Synthesis Flags DSE (Config & TCL Mapping)
+
+By exposing synthesis flags to the BO engine, we can explore the Pareto front between RTL architecture and EDA optimization strategies. The parameter `synth_profile` directs the TCL generation scripts.
+
+| `synth_profile` (YAML) | DC TCL Commands Generated | Strategy Goal |
+| :--- | :--- | :--- |
+| `timing_aggressive` | `compile_ultra -retime -timing_high_effort_script`<br/>`set_dp_smartgen_options -optimization_strategy timing` | Meet strict clock periods at the cost of area/power. |
+| `power_aggressive` | `insert_clock_gating`<br/>`compile_ultra -area_high_effort_script`<br/>`set_dp_smartgen_options -optimization_strategy area` | Minimize area and dynamic power. |
+| `balanced_default` | `insert_clock_gating`<br/>`compile_ultra` (default) | Standard compilation. |
+| `exact_map` | `compile_ultra -exact_map -no_autoungroup` | Preserves hierarchies for precise logic mapping. |
+
+```mermaid
+flowchart LR
+    subgraph Client ["Client (BO Engine)"]
+        A[config.yaml] -->|Generate| B(JSON Payload)
+        B -.->|Includes synth_profile| C
+    end
+
+    subgraph Server ["EDA Server"]
+        C[eda_server.py] --> D[json_to_svh.py]
+        
+        D -->|1. Write Macros| E[`config_macros.svh`]
+        
+        D -->|2. Inject Strategy| F[`synth.tcl`]
+        
+        F --> F1["insert_clock_gating"]
+        F --> F2["compile_ultra -retime -timing_high_effort_script"]
+        F --> F3["set_dp_smartgen_options -strategy ..."]
+        
+        E --> G[Design Compiler]
+        F --> G
+    end
+```
+
+### 5.3 Software-to-RTL Mapping Table
 Implemented in `eda_server_scripts/json_to_svh.py`.
 
 | Software Parameter | Hardware Macro (`config_macros.svh`) | Mathematical Conversion |
@@ -170,6 +259,9 @@ Full-Stack-Accelerator-Optimization/
 - [x] Ax/BoTorch Engine refactoring (`bo_engine.py` + dynamic normalization).
 
 ### Phase 3 & 4: Verification & Full BO Integration [⏳ PENDING]
+- [ ] Implement `synth_profile` logic in `json_to_svh.py` to generate TCL commands.
 - [ ] Establish VCS → PtPX SAIF handoff pipeline (`parse_vcs.py`).
+- [ ] Create parameterized `tb_top.sv` using macros (`TB_CLK_PERIOD_NS`, etc.).
+- [ ] Implement hex data dumping in Path 1 and transmission in JSON payload.
 - [ ] Define hard boundary constraints for all BO parameters (min/max bounds).
 - [ ] **Cross-Path Calibration:** Use Path 2/3 physical data to calibrate Path 1 analytical models.

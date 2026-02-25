@@ -194,3 +194,18 @@
     # - 2048
     # - 4096
   value_type: int
+
+# Synthesis strategy profile — controls DC compile_ultra flags on the EDA Server.
+# Each value maps to a distinct set of TCL commands in json_to_svh.py.
+#   balanced_default   : insert_clock_gating + compile_ultra (standard)
+#   timing_aggressive  : compile_ultra -retime -timing_high_effort_script
+#   power_aggressive   : insert_clock_gating + compile_ultra -area_high_effort_script
+#   exact_map          : compile_ultra -exact_map -no_autoungroup (preserves hierarchy)
+- name: synth_profile
+  type: choice
+  values:
+    - balanced_default
+    - timing_aggressive
+    - power_aggressive
+    - exact_map
+  value_type: str

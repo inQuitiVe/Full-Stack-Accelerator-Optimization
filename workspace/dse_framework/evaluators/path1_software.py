@@ -12,22 +12,30 @@ Canonical output (raw, before normalisation):
     "area_mm2":     float,  # mm^2 (asic_area + rram_area)
   }
 
+Additionally exposes dump_hex_data() for Path 3 (Gate-Level Simulation).
+This function extracts trained model weights and test vectors from the HD model
+and serialises them to HEX files for the VCS Testbench.
+
 The caller (bo_engine.py) normalises these raw values via normalizer.py before
 passing them to the Ax client.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import sys
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import torch
 
 logger = logging.getLogger(__name__)
 
 # Ensure the workspace/HDnn-PIM-Opt directory is on sys.path so we can import sim/
 _WORKSPACE_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "workspace")
+    os.path.join(os.path.dirname(__file__), "..", "..")
 )
 _HDNN_ROOT = os.path.join(_WORKSPACE_ROOT, "HDnn-PIM-Opt")
 if _HDNN_ROOT not in sys.path:
@@ -97,4 +105,135 @@ def evaluate_path1(
         "energy_uj": energy_uj,
         "timing_us": timing_us,
         "area_mm2": area_mm2,
+    }
+
+
+# ── Path 3 Hex Data Dumping ───────────────────────────────────────────────────
+
+def _tensor_to_hex_lines(tensor: torch.Tensor, quantize_bits: int) -> list[str]:
+    """
+    Quantize a float tensor to `quantize_bits`-bit unsigned integers and
+    return one hex string per row (for $readmemh compatibility).
+
+    The tensor is flattened to 2D: (num_vectors, vector_length).
+    Each element is clamped to [0, 2^bits - 1] and formatted as a hex integer
+    with enough digits to represent the bit width (e.g. 8-bit → 2 hex chars).
+    """
+    max_val = (1 << quantize_bits) - 1
+    hex_digits = (quantize_bits + 3) // 4
+
+    flat = tensor.float()
+    t_min, t_max = flat.min(), flat.max()
+    if t_max > t_min:
+        flat = (flat - t_min) / (t_max - t_min) * max_val
+    else:
+        flat = torch.zeros_like(flat)
+    flat = flat.clamp(0, max_val).long()
+
+    if flat.dim() == 1:
+        flat = flat.unsqueeze(0)
+
+    lines: list[str] = []
+    for row in flat:
+        parts = [f"{v.item():0{hex_digits}x}" for v in row]
+        lines.append("".join(parts))
+    return lines
+
+
+def dump_hex_data(
+    evaluator,
+    test_loader,
+    num_vectors: int = 50,
+    quantize_bits: int = 8,
+    output_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Extract inputs, golden labels, and HDnn weight hypervectors from the trained
+    model and serialise them to HEX format for the VCS Testbench.
+
+    Args:
+        evaluator:      The `sim.evaluator.Evaluator` instance (after evaluate() call).
+        test_loader:    PyTorch DataLoader for the test dataset.
+        num_vectors:    Number of test samples to dump (default 50).
+        quantize_bits:  Fixed-point bit width for quantization (default 8).
+        output_dir:     If provided, also write three files:
+                          <output_dir>/inputs.hex
+                          <output_dir>/labels.hex
+                          <output_dir>/weights.hex
+                        If None, files are NOT written to disk.
+
+    Returns:
+        A dict with keys "inputs", "labels", "weights", each containing
+        the file content as a plain-text string (newline-separated hex lines).
+        This dict can be embedded directly in the Path 3 JSON payload.
+
+    Raises:
+        RuntimeError: If the evaluator has not been called yet (no hd_factory).
+    """
+    try:
+        accuracy_eval = evaluator.metric_managers[0].accuracy_evaluator
+        hd_factory = accuracy_eval.hd_factory
+    except AttributeError as exc:
+        raise RuntimeError(
+            "dump_hex_data requires evaluate() to have been called first. "
+            f"Original error: {exc}"
+        ) from exc
+
+    hd_model = hd_factory.create_neurosim()
+    device = next(hd_model.parameters()).device
+
+    # ── 1. Collect `num_vectors` test samples ───────────────────────────────
+    inputs_list: list[torch.Tensor] = []
+    labels_list: list[int] = []
+    collected = 0
+    for batch_x, batch_y in test_loader:
+        for x, y in zip(batch_x, batch_y):
+            inputs_list.append(x.flatten())
+            labels_list.append(int(y.item()))
+            collected += 1
+            if collected >= num_vectors:
+                break
+        if collected >= num_vectors:
+            break
+
+    if not inputs_list:
+        raise RuntimeError("test_loader is empty — cannot dump hex data.")
+
+    inputs_tensor = torch.stack(inputs_list)          # (num_vectors, input_dim)
+    labels_tensor = torch.tensor(labels_list).long()  # (num_vectors,)
+
+    # ── 2. Quantize and serialise inputs ────────────────────────────────────
+    input_lines = _tensor_to_hex_lines(inputs_tensor, quantize_bits)
+
+    # ── 3. Serialise labels (1 hex byte per label) ──────────────────────────
+    label_lines = [f"{v:02x}" for v in labels_list]
+
+    # ── 4. Extract and serialise class hypervectors (weights) ───────────────
+    with torch.no_grad():
+        class_hvs = hd_model.hd_inference.class_hvs  # (num_classes, hd_dim)
+    weight_lines = _tensor_to_hex_lines(class_hvs.cpu(), quantize_bits)
+
+    inputs_text = "\n".join(input_lines) + "\n"
+    labels_text = "\n".join(label_lines) + "\n"
+    weights_text = "\n".join(weight_lines) + "\n"
+
+    logger.info(
+        f"[dump_hex_data] Dumped {len(input_lines)} input vectors, "
+        f"{len(label_lines)} labels, {len(weight_lines)} class hypervectors "
+        f"({quantize_bits}-bit quantization)."
+    )
+
+    # ── 5. Optionally write to disk ─────────────────────────────────────────
+    if output_dir is not None:
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        (out_path / "inputs.hex").write_text(inputs_text, encoding="utf-8")
+        (out_path / "labels.hex").write_text(labels_text, encoding="utf-8")
+        (out_path / "weights.hex").write_text(weights_text, encoding="utf-8")
+        logger.info(f"[dump_hex_data] Files written to {out_path}")
+
+    return {
+        "inputs": inputs_text,
+        "labels": labels_text,
+        "weights": weights_text,
     }

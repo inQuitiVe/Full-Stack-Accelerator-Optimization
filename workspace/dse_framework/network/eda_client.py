@@ -74,6 +74,7 @@ def evaluate_remote(
     port: int = DEFAULT_PORT,
     poll_interval: float = POLL_INTERVAL_S,
     timeout: float = CLIENT_TIMEOUT_S,
+    hex_data: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Submit a hardware evaluation task to the remote EDA Server and wait (via
@@ -86,6 +87,10 @@ def evaluate_remote(
         port:          EDA Server TCP port.
         poll_interval: Seconds between status poll requests.
         timeout:       Maximum seconds to wait before declaring failure.
+        hex_data:      Optional dict with keys "inputs", "labels", "weights"
+                       (plaintext hex strings). When provided (Path 3 only),
+                       the server writes these to hardware/data/ before running
+                       VCS simulation. Set to None for Path 2 (synthesis only).
 
     Returns:
         A dict with at minimum:
@@ -96,8 +101,20 @@ def evaluate_remote(
     Raises:
         EDAClientError: On network-level failures (cannot connect, protocol error).
     """
-    # Step 1: Submit the task
-    submit_payload = {"action": "submit", "job_id": job_id, "params": params}
+    # Step 1: Submit the task (include hex_data payload only when provided)
+    submit_payload: Dict[str, Any] = {
+        "action": "submit",
+        "job_id": job_id,
+        "params": params,
+    }
+    if hex_data is not None:
+        submit_payload["hex_data"] = hex_data
+        logger.info(
+            f"[Job {job_id}] Attaching hex_data payload "
+            f"(inputs={len(hex_data.get('inputs',''))} chars, "
+            f"labels={len(hex_data.get('labels',''))} chars, "
+            f"weights={len(hex_data.get('weights',''))} chars)."
+        )
     try:
         submit_response = _send_and_receive(
             host, port, submit_payload, connect_timeout=SOCKET_CONNECT_TIMEOUT_S
