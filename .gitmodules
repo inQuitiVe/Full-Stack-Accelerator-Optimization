@@ -1,0 +1,6 @@
+[submodule "workspace/HDnn-PIM-Opt"]
+	path = workspace/HDnn-PIM-Opt
+	url = https://github.com/doctryucsd/HDnn-PIM-Opt.git
+[submodule "workspace/accelergy-timeloop-infrastructure"]
+	path = workspace/accelergy-timeloop-infrastructure
+	url = https://github.com/Accelergy-Project/accelergy-timeloop-infrastructure.git

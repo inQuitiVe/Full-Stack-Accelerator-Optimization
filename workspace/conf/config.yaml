@@ -1,0 +1,133 @@
+hydra:
+  job:
+    chdir: true
+
+profile: false
+
+seed: 42
+
+defaults:
+  - params_prop: cimloop
+  - evaluator: cimloop
+
+flow:
+  # - pretrain
+  - evaluator
+  # - optimization
+  # - sweep
+  # - plot_param
+  # - data_collect
+
+data:
+  dataset: mnist
+  train_batch_size: 512
+  test_batch_size: 16
+  num_workers: 0
+  train_ratio: 0.8
+
+training:
+  devices: 
+    - cpu
+  cnn_epochs: 1 # mnist: 10, cifar10: 30
+  cnn_lr: 0.05 # mnist: 0.05, cifar10: 0.01
+  hd_epochs: 1 # mnist: 10, cifar10: 15
+  hd_lr: 1.0
+  num_tests: 1
+
+hardware:
+  type: cimloop
+  # type: analytical
+  noise: true
+  temperature: 300
+  power: energy
+  cnn: true
+
+metrics:
+  - accuracy
+  - power
+  - performance
+  - area
+
+pretrain:
+  epochs: 100
+
+optimization:
+  num_trials: 1
+  num_epochs: 1
+  acqf: qNoisyExpectedHypervolumeImprovement
+  metrics_file: cifar10-random-50
+  constrained: true
+  threshold_schedule: static # Choices: static | linear | exponential
+  # If set, the constraint schedule reaches final targets by this iteration index
+  # (0-based, absolute across the BO loop). After this point, constraints remain fixed.
+  # Leave as null to finish at the last iteration.
+  threshold_schedule_final_iter: 39
+  constraints:
+    accuracy: 0.79
+    power: 0.5
+    performance: 0.5
+    area: 0.2
+  # preference:
+  #   accuracy: 0.4
+  #   power: 0.2
+  #   performance: 0.2
+  #   area: 0.2
+
+# sweep:
+#   interval: 5
+#   metrics_file: sweep
+#   accept_rate: 0.02
+
+evaluator:
+  param:
+    hd_dim: 4000
+    # npe1: 214
+    # npe2: 60
+    reram_size: 256
+    # f1: 200
+    # d1: 128
+    # kron: false
+    frequency: 1e8
+    out_channels_1: 64
+    kernel_size_1: 7
+    stride_1: 2
+    padding_1: 0
+    dilation_1: 1
+    cnn_x_dim_1: 8
+    cnn_y_dim_1: 8
+    out_channels_2: 64
+    kernel_size_2: 3
+    stride_2: 1
+    padding_2: 0
+    dilation_2: 1
+    cnn_x_dim_2: 4
+    cnn_y_dim_2: 4
+    encoder_x_dim: 8
+    encoder_y_dim: 8
+    inner_dim: 4092
+
+plot_param:
+  var_param:
+    hd_dim:
+      - 512
+      - 1024
+      - 2048
+      - 3072
+      - 4096
+      - 5120
+      - 6144
+      - 7168
+      - 8192
+    d1:
+      - 32
+      - 32
+      - 64
+      - 64
+      - 64
+      - 64
+      - 64
+      - 64
+      - 64
+
+data_collect:
+  output_file: hdnn-pim.csv # absolute path if from checkpoint
