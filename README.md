@@ -1,139 +1,175 @@
-# Full-Stack Accelerator Optimization Framework: Architecture & Implementation Plan
-**Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture
-**Last Updated:** Phase 2 (Baseline Exploration Flow) In Progress
+# Full-Stack Accelerator Optimization Framework
 
-## 1. Project Overview & Exploration Strategy [STATUS: DEFINED]
-This project aims to build an automated, closed-loop Design Space Exploration (DSE) framework to optimize a parameterized Processing-in-Memory (PIM) accelerator for Hyperdimensional Neural Networks (HDnn).
-
-### 1.1 Core Algorithm: Bayesian Optimization (BO)
-* **Rationale:** The hardware design space is high-dimensional, and physical hardware evaluations (synthesis/simulation) are highly expensive. BO is chosen for its sample-efficient nature, effectively balancing **exploration** (searching new configurations) and **exploitation** (refining known good configurations).
-* **Current Development Phase:** The decision logic (BO "brain") is intentionally decoupled from the evaluation pipeline ("muscle"). Currently, the framework acts as a robust executor, accepting manually or randomly generated YAML configurations. This ensures the backend automation and remote EDA execution flows are 100% validated before integrating the intelligent search algorithm.
+**Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture  
+**Status:** Phase 2 (Baseline Exploration Flow) Implemented
 
 ---
 
-## 2. Parameter Space Classification & Mapping [STATUS: DONE]
-To maintain the "Zero-Touch RTL" principle and ensure hardware/software consistency, parameters are strictly categorized. All tunable parameters are centrally defined in a `config.yaml` file, ensuring human-readability and version control friendliness.
+## 1. Project Overview & Exploration Strategy
 
-### 2.1 Software Parameter Categorization (Path 1 Inputs)
-Software parameters (`SW params`) are divided into two categories to clarify what impacts the hardware generation versus what only impacts the algorithmic training/dataflow.
+This project builds an automated, closed-loop Design Space Exploration (DSE) framework to optimize a parameterized Processing-in-Memory (PIM) accelerator for Hyperdimensional Neural Networks (HDnn).
 
+### Core Algorithm: Bayesian Optimization (BO)
+The hardware design space is high-dimensional, and physical hardware evaluations (synthesis/simulation) are highly expensive. BO is chosen for its sample-efficient nature, effectively balancing **exploration** and **exploitation**. 
+- **Multi-Objective Target:** Maximize Hypervolume across four metrics (Accuracy, Energy, Timing, Area) to form the Pareto frontier.
+- **Decoupled Execution:** The BO "brain" is decoupled from the hardware "muscle". The EDA Server acts as a Black-box API.
+
+---
+
+## 2. System Architecture (Thin-Client Model)
+
+Due to strict EDA tool licensing constraints, local execution of hardware synthesis is not possible. The framework implements a **Black-Box API** pattern: the local Docker client only transmits parameter JSON, and the remote EDA server executes synthesis and returns distilled numerical metrics.
+
+```mermaid
+flowchart TB
+    subgraph Client ["Client (Local Docker Workspace)"]
+        A[BO Engine<br/>Ax/BoTorch] --> B(Evaluators)
+        B --> C[Path 1: Software Simulation<br/>Cimloop + Timeloop]
+        B --> D[Path 2/3: Hardware<br/>EDA Client Socket]
+    end
+
+    subgraph Server ["EDA Server (Remote Host)"]
+        E[EDA Socket Server<br/>Port 5000] --> F[Task Queue]
+        F --> G[json_to_svh.py<br/>Macro & TCL Gen]
+        G --> H[Design Compiler<br/>Synthesis]
+        H --> I[Regex Parsers<br/>parse_dc.py]
+    end
+
+    D <-->|JSON over TCP<br/>Polling Mechanism| E
+```
+
+---
+
+## 3. Multi-Fidelity Evaluation Pipeline
+
+To overcome the evaluation bottleneck, the framework employs a three-tiered pipeline with **Early Stopping (Gatekeeping)** mechanisms.
+
+```mermaid
+flowchart TD
+    Start([New Configuration from BO]) --> Path1[Path 1: Fast Software Simulation<br/>1-min scale]
+    
+    Path1 --> Gate1{Gate 1:<br/>Accuracy >= Threshold?}
+    Gate1 -- No --> Fail1([mark_trial_failed])
+    
+    Gate1 -- Yes --> Path2[Path 2: Hardware Synthesis<br/>10-min scale]
+    Path2 --> Gate2{Gate 2:<br/>Timing Slack >= 0?}
+    Gate2 -- No --> Fail2([mark_trial_failed])
+    
+    Gate2 -- Yes --> Path3[Path 3: Gate-Level Simulation<br/>30-min scale]
+    Path3 --> Done([Record Successful Trial])
+
+    style Gate1 fill:#f9d0c4,stroke:#333,stroke-width:2px
+    style Gate2 fill:#f9d0c4,stroke:#333,stroke-width:2px
+```
+
+### 3.1 Path 1: Fast Software Simulation
+* **Engine:** `path1_software.py` (Calls Cimloop + Timeloop)
+* **Gate 1:** If PyTorch accuracy is below the defined constraint, the trial is marked as failed without penalty injection.
+
+### 3.2 Path 2: Hardware Synthesis (Client-Side Stitching)
+* **Engine:** `path2_hardware.py`
+* **Stitching Logic:** Since the RRAM portion lacks RTL, Path 2 stitches ASIC data (from the EDA server) with RRAM data (re-run locally via Cimloop).
+  * `Total Timing = ASIC Delay (EDA) + RRAM Delay (Cimloop)`
+  * `Total Energy = ASIC Power (EDA) * Total Timing + RRAM Energy (Cimloop)`
+* **Gate 2:** If the synthesized netlist violates timing constraints (`slack < 0`), the trial fails.
+
+---
+
+## 4. EDA Server Protocol (Black-Box API)
+
+To navigate restrictive corporate firewalls, large `.rpt` files are never transferred. The EDA Server "locally extracts" metrics and returns a tiny JSON payload.
+
+```mermaid
+sequenceDiagram
+    participant BO as BO Engine (Client)
+    participant Client as EDA Client
+    participant Server as EDA Server
+    participant DC as Design Compiler
+
+    BO->>Client: evaluate_remote(params)
+    Client->>Server: POST {"action": "submit", "params": {...}}
+    Server-->>Client: {"status": "accepted", "job_id": 101}
+    
+    Note over Server,DC: Worker thread pops job 101<br/>Generates config_macros.svh
+    Server->>DC: subprocess.run(["make", "synth"])
+    
+    loop Every 15 seconds
+        Client->>Server: GET {"action": "status", "job_id": 101}
+        Server-->>Client: {"status": "running"}
+    end
+    
+    DC-->>Server: Generates .rpt files
+    Server->>Server: parse_dc.py extracts Area, Timing, Power
+    
+    Client->>Server: GET {"action": "status", "job_id": 101}
+    Server-->>Client: {"status": "success", "metrics": {...}}
+    Client-->>BO: Return ASIC PPA metrics
+```
+
+---
+
+## 5. Parameter Space Classification & Mapping
+
+Tunable parameters are centrally defined in `workspace/conf/params_prop/cimloop.yaml`.
+
+### 5.1 Software Parameter Categorization
 * **Category 1: Hardware-Related (Alters RTL Geometry & Memory)**
-  * `hd_dim`, `inner_dim`: Dictates datapath width, counter sizes, and SRAM dimensions.
-  * `reram_size`: Dictates the RRAM array dimensions and address widths.
-  * `cell_bit`: Influences the precision and analog-to-digital interface in CIM.
-  * `cnn_x_dim_1/2`, `cnn_y_dim_1/2`, `encoder_x_dim/y_dim`: Spatial mapping dimensions that dictate the physical parallelization (number of Processing Elements, Inputs/Outputs).
-  * `num_classes`: Dictates the sizing of the search/associative memory and label buses.
-
+  * `hd_dim`, `inner_dim`, `reram_size`
+  * Spatial mapping: `cnn_x_dim_1/2`, `encoder_x_dim/y_dim`, etc.
 * **Category 2: Training & Dataflow-Related (No RTL Impact)**
-  * `dataset_name`, `num_tests`: Evaluation dataset configuration.
-  * `hd_epochs`, `hd_lr`, `cnn_epochs`, `cnn_lr`: Training hyperparameters.
-  * `noise`, `temperature`, `frequency`: Environmental simulation conditions for Path 1 analytical models.
+  * `dataset`, `frequency`, `hd_epochs`, `cnn_epochs`
+  * `cnn` (Fixed flag: true = CNN+HD, false = HD only)
 
-### 2.2 SystemVerilog Parameter Injection & Translation Layer
-A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and generates a SystemVerilog macro header (`config_macros.svh`). 
+### 5.2 Software-to-RTL Mapping Table
+Implemented in `eda_server_scripts/json_to_svh.py`.
 
-* **Category A: Fixed Parameters (Do Not Touch)**
-  * *Examples:* `` `USE_DW ``, `` `USE_CW ``, `` `READ_FEAT_PATTERNET `` ~ `` `HD_PRED ``, `` `INST_WIDTH ``, `` `JTAG_LEN ``.
-* **Category B: Tunable Parameters (Direct Injection via YAML)**
-  * *Examples:* `` `INPUTS_NUM ``, `` `OUTPUTS_NUM ``, `` `HV_SEG_WIDTH ``, `` `PRE_FETCH_SIZE ``, `` `INST_FIFO_DEPTH ``.
-* **Category C: Derived Parameters (Handled by Python Logic)**
-  * The script applies strict mathematical relationships to ensure valid RTL generation:
-
-| Software Parameter | Hardware Parameter (`SystemVerilog Macro`) | Mathematical Conversion / Logic |
+| Software Parameter | Hardware Macro (`config_macros.svh`) | Mathematical Conversion |
 | :--- | :--- | :--- |
-| `reram_size` | `RRAM_ROW_ADDR_WIDTH` | $\lceil \log_2(\text{reram size}) \rceil$ |
-| `num_classes` | `CLASS_LABEL_WIDTH` | $\lceil \log_2(\text{num classes}) \rceil$ |
-| `hd_dim` / Spatial Dims | `HV_SEG_WIDTH` | Derivation based on PE array sizing |
-| *Derived Internally* | `WEIGHT_BUS_WIDTH` | $\text{WEIGHT MEM DATA WIDTH} \times \text{NUM RF BANK}$ |
+| `reram_size` | `` `RRAM_ROW_ADDR_WIDTH `` | `ceil(log2(reram_size))` |
+| `hd_dim` | `` `HV_LENGTH `` | Direct |
+| `inner_dim` | `` `INNER_DIM `` | Direct |
+| `cnn_x_dim_1` × `cnn_y_dim_1` | `` `INPUTS_NUM `` (Layer 1) | Product |
+| `encoder_x_dim` × `encoder_y_dim` | `` `ENC_INPUTS_NUM `` | Product |
+| `hd_dim` / (`encoder_x_dim` × `encoder_y_dim`) | `` `HV_SEG_WIDTH `` | Integer Division |
+| `frequency` | DC TCL `create_clock -period` | `1e9 / frequency` (ns) |
 
 ---
 
-## 3. Multi-Fidelity Evaluation Pipeline [STATUS: DEFINED]
+## 6. Directory Structure
 
-
-To overcome the evaluation bottleneck, the framework employs a three-tiered pipeline. This structure progressively evaluates designs from low to high fidelity, utilizing **Early Stopping (Gatekeeping)** mechanisms to discard sub-optimal configurations early and save compute time.
-
-### 3.1 Path 1: Fast Software Simulation (1-min scale)
-* **Purpose:** High-level algorithmic and analytical hardware estimation to rapidly prune the design space.
-* **Engine:** Python wrapper (`Path1Evaluator`) around `HDnn-PIM-Opt/sim` decoupled via kwargs injection.
-* **Evaluation Metrics (Standardized):**
-  * **Accuracy:** Golden model accuracy.
-  * **Energy:** $(\text{Timeloop uJ} + \text{CimLoop uJ}) \times 10^6 \rightarrow \text{pJ}$
-  * **Time:** $\max(\text{Timeloop Clock}, \text{CimLoop Clock}) \times 10^3 \rightarrow \text{ns}$
-  * **Area:** $(\text{Timeloop mm}^2 + \text{CimLoop mm}^2) \times 10^6 \rightarrow \text{um}^2$
-* **Gatekeeping (Gate 1):** If the estimated accuracy falls below an acceptable threshold or area exceeds constraints, the configuration is immediately discarded.
-
-### 3.2 Path 2: Hardware Synthesis (10-min scale)
-* **Purpose:** Medium-fidelity evaluation to obtain accurate post-synthesis area and timing metrics.
-* **Engine:** Synopsys Design Compiler (DC Synth).
-* **Evaluation Metrics:**
-  * **Area:** $\sum \text{Component Area}$ ($\text{um}^2$, considering optimization and resource sharing).
-  * **Timing:** $\text{Clock Period}$ ($\text{ns}$, accurate critical path delay).
-  * **Power:** Unit Power (Static/Leakage power is accurate; Dynamic serves as a relative trend).
-* **Gatekeeping (Gate 2):** If the synthesized netlist fails to meet the target Clock Period (Timing Violation, Slack < 0), the design is discarded.
-
-### 3.3 Path 3: Gate-Level Simulation & Power Analysis (30-min+ scale)
-* **Purpose:** High-fidelity evaluation acting as the absolute ground truth for dynamic power consumption and cycle-accurate performance.
-* **Engine:** Synopsys VCS + PrimeTime PX (PtPX).
-* **Workflow:** VCS runs the synthesized netlist against configuration-aware testbenches to generate accurate switching activity files (SAIF/FSDB). These activity files are then fed into PtPX (or DC) to calculate exact dynamic power.
-* **Evaluation Metrics:**
-  * **Time:** $\text{Period} \times N_{\text{Exec Cycles}}$
-  * **Energy:** $\text{Unit Power} \times \text{Time}$
+```text
+Full-Stack-Accelerator-Optimization/
+│
+├── run_exploration.py                 # Main entry point (CLI args for Path 2/3)
+│
+├── workspace/                         # Local execution environment
+│   ├── dse_framework/                 # [Core] DSE Control Center
+│   │   ├── evaluators/                # Evaluator Wrappers (Path 1 & 2)
+│   │   ├── network/                   # Socket Client (Polling Protocol)
+│   │   └── core_algorithm/            # BO Engine & Dynamic Normalizer
+│   │
+│   ├── HDnn-PIM-Opt/                  # Pure software evaluator (Path 1 / Cimloop)
+│   └── conf/                          # Hydra configurations (YAML)
+│
+└── eda_server_scripts/                # Deploy on remote EDA Server
+    ├── eda_server.py                  # Socket Server (Queue + Timeout)
+    ├── json_to_svh.py                 # Macro & TCL generation
+    └── parsers/                       # DC and VCS regex parsers
+```
 
 ---
 
-## 4. Automation & Remote Execution Infrastructure [STATUS: IN PROGRESS]
-[Image of client-server network architecture diagram]
+## 7. Implementation To-Do / Status
 
-Due to strict EDA tool licensing constraints, local execution of Path 2/3 is not possible. The framework implements a localized TCP/IP Client-Server architecture.
+### Phase 2: Automation Baseline [✅ COMPLETED]
+- [x] Parameter Mapping Table & `json_to_svh.py`.
+- [x] `eda_server.py` with Task Queue and strict 30-min timeouts.
+- [x] Regex parsers for DC reports (`parse_dc.py`).
+- [x] Polling client (`eda_client.py`).
+- [x] Client-side data stitching (`path2_hardware.py`).
+- [x] Ax/BoTorch Engine refactoring (`bo_engine.py` + dynamic normalization).
 
-### 4.1 Detailed Implementation Strategy
-* **Local Host (Exploration Client):**
-  * Runs the BO algorithm in Python.
-  * Serializes the `{SW params, HW spec}` configuration into a JSON payload.
-  * Opens a socket connection, sends the JSON, and waits for a response (blocking with timeout).
-* **Remote Host (Licensed EDA Server):**
-  * Runs a persistent Python socket server listening on a specific port.
-  * **Execution Flow:**
-    1. Receives JSON config and writes it to a temporary `config.yaml`.
-    2. Executes `python yaml_to_svh.py` to generate `config_macros.svh`.
-    3. Uses `subprocess.run(["make", "synth"])` to headlessly trigger Design Compiler.
-    4. Triggers the Regex Log Parser (see Section 5) to extract PPA.
-    5. Packages extracted metrics into a JSON response and sends it back to the Client.
-* **Error Handling:** If `subprocess` returns a non-zero exit code (e.g., DC crashes due to unroutable RTL), the server catches the exception and returns a JSON payload with `"status": "error"` and a massive penalty score to the BO algorithm.
-
----
-
-## 5. EDA Log Parsing Strategy [STATUS: IN PROGRESS]
-To automate data extraction from massive Synopsys text reports, the framework uses custom Python regex-based parsers (`parse_dc.py`, `parse_vcs.py`).
-
-### 5.1 Design Compiler (DC) Parsing Logic
-The script reads output `.rpt` files generated by the Makefile:
-
-* **1. Parsing Area (`report_area.rpt`):**
-  * Look for the line indicating total combinatorial and non-combinatorial area.
-  * *Regex:* `r"Total cell area:\s+([0-9.]+)"`
-  * *Python:* `match.group(1)` yields the exact float value.
-* **2. Parsing Timing (`report_timing.rpt`):**
-  * Look for the final slack margin.
-  * *Regex (Slack):* `r"slack\s+\((MET|VIOLATED)\)\s+([-\.0-9]+)"`
-  * *Logic:* If group 1 is "VIOLATED", Gate 2 logic immediately flags the design as failed.
-* **3. Parsing Power (`report_power.rpt`):**
-  * *Regex (Dynamic):* `r"Total Dynamic Power\s+=\s+([0-9.]+)\s+(\w+)"` (Group 2 captures units like `mW` or `uW` for auto-scaling).
-  * *Regex (Leakage):* `r"Cell Leakage Power\s+=\s+([0-9.]+)\s+(\w+)"`
-
----
-
-## 6. Pre-Implementation To-Do List [STATUS: PENDING]
-
-### Phase 2: Automation Baseline (Immediate Focus)
-- [ ] **Task 1: The Translation Script.** Write `yaml_to_svh.py` implementing the exact math defined in Section 2.2.
-- [ ] **Task 2: Socket Server.** Write `server.py` and `client.py` using standard Python `socket` and `json` libraries. Implement a basic handshake.
-- [ ] **Task 3: Makefiles.** Standardize the `Makefile` for DC and VCS so they can be executed headlessly without GUI (`-no_gui` flag).
-- [ ] **Task 4: Regex Parsers.** Write `parse_dc.py` and test it against a historically successful `.rpt` file to ensure the regex patterns are robust.
-
-### Phase 3 & 4: Verification & Exploration
-- [ ] Establish the VCS to PtPX SAIF handoff pipeline.
-- [ ] Integrate Bayesian Optimization (e.g., using `Ax` or `BoTorch` libraries).
-- [ ] Define hard boundary constraints (Min/Max values) for every parameter to prevent BO from generating illegal configurations.
-- [ ] **Cross-Path Calibration:** Implement a feedback loop where physical hardware metrics from Path 2 and Path 3 are used to calibrate the analytical models in Path 1, minimizing Correlation Mismatch.
+### Phase 3 & 4: Verification & Full BO Integration [⏳ PENDING]
+- [ ] Establish VCS → PtPX SAIF handoff pipeline (`parse_vcs.py`).
+- [ ] Define hard boundary constraints for all BO parameters (min/max bounds).
+- [ ] **Cross-Path Calibration:** Use Path 2/3 physical data to calibrate Path 1 analytical models.
