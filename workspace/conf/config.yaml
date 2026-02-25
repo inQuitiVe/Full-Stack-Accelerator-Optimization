@@ -12,8 +12,8 @@ defaults:
 
 flow:
   # - pretrain
-  - evaluator
-  # - optimization
+  # - evaluator
+  - optimization
   # - sweep
   # - plot_param
   # - data_collect
@@ -52,8 +52,8 @@ pretrain:
   epochs: 100
 
 optimization:
-  num_trials: 1
-  num_epochs: 1
+  num_trials: 10
+  num_epochs: 2
   acqf: qNoisyExpectedHypervolumeImprovement
   metrics_file: cifar10-random-50
   constrained: true
