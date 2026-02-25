@@ -3,6 +3,8 @@
 **Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture  
 **Status:** Phase 2 (Baseline Exploration Flow) Implemented | Phase 3 (Verification & EDA DSE) Planning
 
+All architecture and flow diagrams (Mermaid) are in **[README_IMAGES.md](README_IMAGES.md)**.
+
 ---
 
 ## 1. Project Overview & Exploration Strategy
@@ -20,23 +22,7 @@ The hardware design space is high-dimensional, and physical hardware evaluations
 
 Due to strict EDA tool licensing constraints, local execution of hardware synthesis is not possible. The framework implements a **Black-Box API** pattern: the local Docker client only transmits parameter JSON, and the remote EDA server executes synthesis and returns distilled numerical metrics.
 
-```mermaid
-flowchart TB
-    subgraph Client ["Client (Local Docker Workspace)"]
-        A[BO Engine<br/>Ax/BoTorch] --> B(Evaluators)
-        B --> C[Path 1: Software Simulation<br/>Cimloop + Timeloop]
-        B --> D[Path 2/3: Hardware<br/>EDA Client Socket]
-    end
-
-    subgraph Server ["EDA Server (Remote Host)"]
-        E[EDA Socket Server<br/>Port 5000] --> F[Task Queue]
-        F --> G[json_to_svh.py<br/>Macro & TCL Gen]
-        G --> H[Design Compiler<br/>Synthesis]
-        H --> I[Regex Parsers<br/>parse_dc.py]
-    end
-
-    D <-->|JSON over TCP<br/>Polling Mechanism| E
-```
+**Diagram:** [System Architecture (Thin-Client)](README_IMAGES.md#1-system-architecture-thin-client-model) — see [README_IMAGES.md](README_IMAGES.md).
 
 ---
 
@@ -44,23 +30,7 @@ flowchart TB
 
 To overcome the evaluation bottleneck, the framework employs a three-tiered pipeline with **Early Stopping (Gatekeeping)** mechanisms.
 
-```mermaid
-flowchart TD
-    Start([New Configuration from BO]) --> Path1[Path 1: Fast Software Simulation<br/>1-min scale]
-    
-    Path1 --> Gate1{Gate 1:<br/>Accuracy >= Threshold?}
-    Gate1 -- No --> Fail1([mark_trial_failed])
-    
-    Gate1 -- Yes --> Path2[Path 2: Hardware Synthesis<br/>10-min scale]
-    Path2 --> Gate2{Gate 2:<br/>Timing Slack >= 0?}
-    Gate2 -- No --> Fail2([mark_trial_failed])
-    
-    Gate2 -- Yes --> Path3[Path 3: Gate-Level Simulation<br/>30-min scale]
-    Path3 --> Done([Record Successful Trial])
-
-    style Gate1 fill:#f9d0c4,stroke:#333,stroke-width:2px
-    style Gate2 fill:#f9d0c4,stroke:#333,stroke-width:2px
-```
+**Diagram:** [Multi-Fidelity Evaluation Pipeline](README_IMAGES.md#2-multi-fidelity-evaluation-pipeline) — see [README_IMAGES.md](README_IMAGES.md).
 
 ### 3.1 Path 1: Fast Software Simulation
 * **Engine:** `path1_software.py` (Calls Cimloop + Timeloop)
@@ -82,40 +52,7 @@ flowchart TD
 #### Phase 3 Testbench Architecture & Data Flow
 Because the EDA server is a black box, the client must generate the test data dynamically and send it to the server to be read by the Testbench (`tb_top.sv`).
 
-```mermaid
-flowchart TD
-    subgraph Client ["Client (Docker)"]
-        P1[Path 1: PyTorch Model] -->|Dump| H1(inputs.hex)
-        P1 -->|Dump| H2(labels.hex)
-        P1 -->|Dump| H3(weights.hex)
-        
-        SW_Params[YAML: num_tests, frequency] --> JSON[JSON Payload]
-        H1 -.->|Base64 or Text| JSON
-        H2 -.-> JSON
-        H3 -.-> JSON
-    end
-
-    subgraph Server ["EDA Server (VCS + PtPX)"]
-        JSON -->|Extract| S_Data[data/ Directory]
-        JSON -->|Generate| S_Macro[`tb_macros.svh`]
-        
-        S_Macro -->|TB_CLK_PERIOD_NS<br/>TB_NUM_VECTORS| TB[`tb_top.sv`]
-        S_Data -->| $readmemh | TB
-        
-        Netlist[`synth_netlist.v`] --> TB
-        
-        TB -->|Run Simulation| VCS[Synopsys VCS]
-        
-        VCS -->|1. Print| Log[`vcs.log`]
-        VCS -->|2. Dump| SAIF[`activity.saif`]
-        
-        Log -->|Parse| Cycles[Execution Cycles & HW Accuracy]
-        SAIF --> PtPX[PrimeTime PX] --> Power[Exact Dynamic Power]
-    end
-    
-    style TB fill:#d4edda,stroke:#333,stroke-width:2px
-    style Netlist fill:#cce5ff,stroke:#333,stroke-width:2px
-```
+**Diagram:** [Phase 3 Testbench Architecture and Data Flow](README_IMAGES.md#3-phase-3-testbench-architecture-and-data-flow) — see [README_IMAGES.md](README_IMAGES.md).
 
 **Testbench Parameter Mapping:**
 | Original Parameter (YAML) | Testbench Macro / Parameter | Purpose in TB |
@@ -132,32 +69,7 @@ flowchart TD
 
 To navigate restrictive corporate firewalls, large `.rpt` files are never transferred. The EDA Server "locally extracts" metrics and returns a tiny JSON payload.
 
-```mermaid
-sequenceDiagram
-    participant BO as BO Engine (Client)
-    participant Client as EDA Client
-    participant Server as EDA Server
-    participant DC as Design Compiler
-
-    BO->>Client: evaluate_remote(params)
-    Client->>Server: POST {"action": "submit", "params": {...}}
-    Server-->>Client: {"status": "accepted", "job_id": 101}
-    
-    Note over Server,DC: Worker thread pops job 101<br/>Generates config_macros.svh
-    Server->>DC: subprocess.run(["make", "synth"])
-    
-    loop Every 15 seconds
-        Client->>Server: GET {"action": "status", "job_id": 101}
-        Server-->>Client: {"status": "running"}
-    end
-    
-    DC-->>Server: Generates .rpt files
-    Server->>Server: parse_dc.py extracts Area, Timing, Power
-    
-    Client->>Server: GET {"action": "status", "job_id": 101}
-    Server-->>Client: {"status": "success", "metrics": {...}}
-    Client-->>BO: Return ASIC PPA metrics
-```
+**Diagram:** [EDA Server Protocol (Polling Sequence)](README_IMAGES.md#4-eda-server-protocol-polling-sequence) — see [README_IMAGES.md](README_IMAGES.md).
 
 ---
 
@@ -186,28 +98,7 @@ By exposing synthesis flags to the BO engine, we can explore the Pareto front be
 | `balanced_default` | `insert_clock_gating`<br/>`compile_ultra` (default) | Standard compilation. |
 | `exact_map` | `compile_ultra -exact_map -no_autoungroup` | Preserves hierarchies for precise logic mapping. |
 
-```mermaid
-flowchart LR
-    subgraph Client ["Client (BO Engine)"]
-        A[config.yaml] -->|Generate| B(JSON Payload)
-        B -.->|Includes synth_profile| C
-    end
-
-    subgraph Server ["EDA Server"]
-        C[eda_server.py] --> D[json_to_svh.py]
-        
-        D -->|1. Write Macros| E[`config_macros.svh`]
-        
-        D -->|2. Inject Strategy| F[`synth.tcl`]
-        
-        F --> F1["insert_clock_gating"]
-        F --> F2["compile_ultra -retime -timing_high_effort_script"]
-        F --> F3["set_dp_smartgen_options -strategy ..."]
-        
-        E --> G[Design Compiler]
-        F --> G
-    end
-```
+**Diagram:** [Synthesis Profile to TCL Injection (Config Flow)](README_IMAGES.md#5-synthesis-profile-to-tcl-injection-config-flow) — see [README_IMAGES.md](README_IMAGES.md).
 
 ### 5.3 Software-to-RTL Mapping Table
 Implemented in `eda_server_scripts/json_to_svh.py`.
