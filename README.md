@@ -1,7 +1,8 @@
 # Full-Stack Accelerator Optimization Framework: Architecture & Implementation Plan
 **Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture
+**Last Updated:** Phase 2 (Baseline Exploration Flow) In Progress
 
-## 1. Project Overview & Exploration Strategy
+## 1. Project Overview & Exploration Strategy [STATUS: DEFINED]
 This project aims to build an automated, closed-loop Design Space Exploration (DSE) framework to optimize a parameterized Processing-in-Memory (PIM) accelerator for Hyperdimensional Neural Networks (HDnn).
 
 ### 1.1 Core Algorithm: Bayesian Optimization (BO)
@@ -10,29 +11,68 @@ This project aims to build an automated, closed-loop Design Space Exploration (D
 
 ---
 
-## 2. Multi-Fidelity Evaluation Pipeline
+## 2. Parameter Space Classification & Mapping [STATUS: DONE]
+To maintain the "Zero-Touch RTL" principle and ensure hardware/software consistency, parameters are strictly categorized. All tunable parameters are centrally defined in a `config.yaml` file, ensuring human-readability and version control friendliness.
+
+### 2.1 Software Parameter Categorization (Path 1 Inputs)
+Software parameters (`SW params`) are divided into two categories to clarify what impacts the hardware generation versus what only impacts the algorithmic training/dataflow.
+
+* **Category 1: Hardware-Related (Alters RTL Geometry & Memory)**
+  * `hd_dim`, `inner_dim`: Dictates datapath width, counter sizes, and SRAM dimensions.
+  * `reram_size`: Dictates the RRAM array dimensions and address widths.
+  * `cell_bit`: Influences the precision and analog-to-digital interface in CIM.
+  * `cnn_x_dim_1/2`, `cnn_y_dim_1/2`, `encoder_x_dim/y_dim`: Spatial mapping dimensions that dictate the physical parallelization (number of Processing Elements, Inputs/Outputs).
+  * `num_classes`: Dictates the sizing of the search/associative memory and label buses.
+
+* **Category 2: Training & Dataflow-Related (No RTL Impact)**
+  * `dataset_name`, `num_tests`: Evaluation dataset configuration.
+  * `hd_epochs`, `hd_lr`, `cnn_epochs`, `cnn_lr`: Training hyperparameters.
+  * `noise`, `temperature`, `frequency`: Environmental simulation conditions for Path 1 analytical models.
+
+### 2.2 SystemVerilog Parameter Injection & Translation Layer
+A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and generates a SystemVerilog macro header (`config_macros.svh`). 
+
+* **Category A: Fixed Parameters (Do Not Touch)**
+  * *Examples:* `` `USE_DW ``, `` `USE_CW ``, `` `READ_FEAT_PATTERNET `` ~ `` `HD_PRED ``, `` `INST_WIDTH ``, `` `JTAG_LEN ``.
+* **Category B: Tunable Parameters (Direct Injection via YAML)**
+  * *Examples:* `` `INPUTS_NUM ``, `` `OUTPUTS_NUM ``, `` `HV_SEG_WIDTH ``, `` `PRE_FETCH_SIZE ``, `` `INST_FIFO_DEPTH ``.
+* **Category C: Derived Parameters (Handled by Python Logic)**
+  * The script applies strict mathematical relationships to ensure valid RTL generation:
+
+| Software Parameter | Hardware Parameter (`SystemVerilog Macro`) | Mathematical Conversion / Logic |
+| :--- | :--- | :--- |
+| `reram_size` | `RRAM_ROW_ADDR_WIDTH` | $\lceil \log_2(\text{reram\_size}) \rceil$ |
+| `num_classes` | `CLASS_LABEL_WIDTH` | $\lceil \log_2(\text{num\_classes}) \rceil$ |
+| `hd_dim` / Spatial Dims | `HV_SEG_WIDTH` | Derivation based on PE array sizing |
+| *Derived Internally* | `WEIGHT_BUS_WIDTH` | $\text{WEIGHT\_MEM\_DATA\_WIDTH} \times \text{NUM\_RF\_BANK}$ |
+
+---
+
+## 3. Multi-Fidelity Evaluation Pipeline [STATUS: DEFINED]
+
+
 To overcome the evaluation bottleneck, the framework employs a three-tiered pipeline. This structure progressively evaluates designs from low to high fidelity, utilizing **Early Stopping (Gatekeeping)** mechanisms to discard sub-optimal configurations early and save compute time.
 
-### 2.1 Path 1: Fast Software Simulation (1-min scale)
+### 3.1 Path 1: Fast Software Simulation (1-min scale)
 * **Purpose:** High-level algorithmic and analytical hardware estimation to rapidly prune the design space.
-* **Engine:** Python-based simulator adapted from the existing `HDnn-PIM-Opt/sim` repository. A standardized Python adapter (`Path1Evaluator`) wraps the existing simulator to decouple argument parsing and enable direct dictionary/kwargs injection.
-* **Evaluation Metrics:**
+* **Engine:** Python wrapper (`Path1Evaluator`) around `HDnn-PIM-Opt/sim` decoupled via kwargs injection.
+* **Evaluation Metrics (Standardized):**
   * **Accuracy:** Golden model accuracy.
-  * **Energy:** $\text{Unit Cost} \times N_{\text{OPS}}$
-  * **Time:** $\text{Clock Period} \times N_{\text{OPS}}$
-  * **Area:** $\sum \text{Datapath Components}$
+  * **Energy:** $(\text{Timeloop uJ} + \text{CimLoop uJ}) \times 10^6 \rightarrow \text{pJ}$
+  * **Time:** $\max(\text{Timeloop Clock}, \text{CimLoop Clock}) \times 10^3 \rightarrow \text{ns}$
+  * **Area:** $(\text{Timeloop mm}^2 + \text{CimLoop mm}^2) \times 10^6 \rightarrow \text{um}^2$
 * **Gatekeeping (Gate 1):** If the estimated accuracy falls below an acceptable threshold or area exceeds constraints, the configuration is immediately discarded.
 
-### 2.2 Path 2: Hardware Synthesis (10-min scale)
+### 3.2 Path 2: Hardware Synthesis (10-min scale)
 * **Purpose:** Medium-fidelity evaluation to obtain accurate post-synthesis area and timing metrics.
 * **Engine:** Synopsys Design Compiler (DC Synth).
 * **Evaluation Metrics:**
-  * **Area:** $\sum \text{Component Area}$ (Accurate gate-level area considering optimization and resource sharing).
-  * **Timing:** $\text{Clock Period}$ (Accurate critical path delay).
-  * **Power:** Unit Power (Note: Provides accurate Static/Leakage power; Dynamic power is estimated based on default toggle rates and serves only as a relative trend).
-* **Gatekeeping (Gate 2):** If the synthesized netlist fails to meet the target Clock Period (Timing Violation), the design is discarded, preventing unnecessary simulation.
+  * **Area:** $\sum \text{Component Area}$ ($\text{um}^2$, considering optimization and resource sharing).
+  * **Timing:** $\text{Clock Period}$ ($\text{ns}$, accurate critical path delay).
+  * **Power:** Unit Power (Static/Leakage power is accurate; Dynamic serves as a relative trend).
+* **Gatekeeping (Gate 2):** If the synthesized netlist fails to meet the target Clock Period (Timing Violation, Slack < 0), the design is discarded.
 
-### 2.3 Path 3: Gate-Level Simulation & Power Analysis (30-min+ scale)
+### 3.3 Path 3: Gate-Level Simulation & Power Analysis (30-min+ scale)
 * **Purpose:** High-fidelity evaluation acting as the absolute ground truth for dynamic power consumption and cycle-accurate performance.
 * **Engine:** Synopsys VCS + PrimeTime PX (PtPX).
 * **Workflow:** VCS runs the synthesized netlist against configuration-aware testbenches to generate accurate switching activity files (SAIF/FSDB). These activity files are then fed into PtPX (or DC) to calculate exact dynamic power.
@@ -42,64 +82,58 @@ To overcome the evaluation bottleneck, the framework employs a three-tiered pipe
 
 ---
 
-## 3. Configuration Management & Hardware Isolation
-The framework adheres to a strict **"Zero-Touch RTL"** principle. The core SystemVerilog design is completely isolated from the exploration logic to prevent breaking verified hardware.
+## 4. Automation & Remote Execution Infrastructure [STATUS: IN PROGRESS]
+[Image of client-server network architecture diagram]
 
-### 3.1 YAML-Driven Configuration
-All tunable parameters are centrally defined in a `config.yaml` file, ensuring human-readability, reproducibility, and version control friendliness.
+Due to strict EDA tool licensing constraints, local execution of Path 2/3 is not possible. The framework implements a localized TCP/IP Client-Server architecture.
 
-### 3.2 SystemVerilog Parameter Injection & Categorization
-A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and generates a SystemVerilog macro header (`config_macros.svh`). Based on RTL analysis, parameters are strictly categorized to constrain the search space:
-
-* **Category A: Fixed Parameters (Do Not Touch)**
-  * *Purpose:* Infrastructure, EDA flags, and ISA definitions.
-  * *Examples:* `` `USE_DW ``, `` `USE_CW ``, `` `READ_FEAT_PATTERNET `` ~ `` `HD_PRED ``, `` `INST_WIDTH ``, `` `JTAG_LEN ``.
-* **Category B: Tunable Parameters (Exploration Space via YAML)**
-  * *Compute & Datapath:* `` `INPUTS_NUM ``, `` `OUTPUTS_NUM ``, `` `HV_SEG_WIDTH ``, `` `MAX_CLASS_NUM ``, `` `SP_TRAINING_WIDTH ``.
-  * *Memory Sizing:* `` `PRE_FETCH_SIZE ``, `` `NUM_RF_BANK ``, `` `INP_BUF_ADDR_WIDTH ``, `` `DATA_BUF_ADDR_WIDTH ``, `` `RRAM_ROW_ADDR_WIDTH ``.
-  * *FIFO Depths:* `` `CDC_INST_FIFO_DEPTH ``, `` `CDC_IO_FIFO_DEPTH ``, `` `INST_FIFO_DEPTH ``, `` `IO_FIFO_DEPTH ``.
-* **Category C: Derived Parameters (Handled by Python Translation Layer)**
-  * *Purpose:* Parameters that depend on mathematical relationships. The Python script calculates these automatically to ensure valid RTL generation.
-  * *Examples:* `` `CLASS_LABEL_WIDTH `` (calculated as `$clog2(MAX_CLASS_NUM)`), `` `WEIGHT_BUS_WIDTH `` (calculated as `WEIGHT_MEM_DATA_WIDTH * NUM_RF_BANK`).
-
----
-
-## 4. Automation & Remote Execution Infrastructure
-
-Due to strict EDA tool licensing constraints, local execution of Path 2/3 is not possible. The framework implements a localized Client-Server architecture.
-
-* **Local Host (Exploration Node):**
-  * Runs the BO algorithm and evaluation pipeline logic.
-  * Generates YAML configurations.
-  * Acts as a Socket Client, sending configuration payloads to the remote host.
-* **Remote Host (Licensed EDA Node):**
-  * Runs a Socket Server (Tcl/Python).
-  * Listens for incoming configurations.
-  * Translates YAML to `.svh` (or receives it directly).
-  * Triggers Makefile execution for Design Compiler and VCS.
-* **Automated Telemetry Extraction:**
-  * Custom Python regex-based parsers (`parse_dc.py`, `parse_vcs.py`) automatically extract critical metrics (Area, Critical Path Slack, Leakage/Dynamic Power, Cycle Counts) from massive unstructured EDA logs.
-  * Parsed results are condensed into structured JSON dictionaries and returned via socket to the Local Host.
+### 4.1 Detailed Implementation Strategy
+* **Local Host (Exploration Client):**
+  * Runs the BO algorithm in Python.
+  * Serializes the `{SW params, HW spec}` configuration into a JSON payload.
+  * Opens a socket connection, sends the JSON, and waits for a response (blocking with timeout).
+* **Remote Host (Licensed EDA Server):**
+  * Runs a persistent Python socket server listening on a specific port.
+  * **Execution Flow:**
+    1. Receives JSON config and writes it to a temporary `config.yaml`.
+    2. Executes `python yaml_to_svh.py` to generate `config_macros.svh`.
+    3. Uses `subprocess.run(["make", "synth"])` to headlessly trigger Design Compiler.
+    4. Triggers the Regex Log Parser (see Section 5) to extract PPA.
+    5. Packages extracted metrics into a JSON response and sends it back to the Client.
+* **Error Handling:** If `subprocess` returns a non-zero exit code (e.g., DC crashes due to unroutable RTL), the server catches the exception and returns a JSON payload with `"status": "error"` and a massive penalty score to the BO algorithm.
 
 ---
 
-## 5. Pre-Implementation Research & Pending Action Items
-Before writing the core automation scripts, the following research and planning tasks must be completed to ensure a smooth and bug-free integration phase. This acts as our immediate To-Do list:
+## 5. EDA Log Parsing Strategy [STATUS: IN PROGRESS]
+To automate data extraction from massive Synopsys text reports, the framework uses custom Python regex-based parsers (`parse_dc.py`, `parse_vcs.py`).
 
-### 5.1 Path 1: Software Simulator (`HDnn-PIM-Opt`) Profiling
-- [ ] **Input Parameter Mapping:** Identify the exact Python variables/arguments in the `sim` folder that correspond to our Tunable Hardware Parameters (e.g., mapping YAML's `hv_seg_width` to the script's internal variable).
-- [ ] **Output Metric Standardization:** Determine how the current simulator outputs Accuracy, Area, Power, and Timing. Plan the modifications needed to make it return a standard Python dictionary instead of `print()` statements.
-- [ ] **Headless Execution:** Ensure the `sim` code can run entirely in the background. Identify and comment out any GUI triggers, `matplotlib` plotting, or interactive prompts.
+### 5.1 Design Compiler (DC) Parsing Logic
+The script reads output `.rpt` files generated by the Makefile:
 
-### 5.2 Path 2/3: EDA Automation & Log Parsing Strategy
-- [ ] **EDA Script Standardization:** Draft the exact `Makefile` or Tcl scripts needed to run Design Compiler and VCS strictly from the command line (batch mode, no GUI).
-- [ ] **Log File Identification (Crucial):** Run a manual DC and VCS flow *once*. Identify exactly which `.rpt` or `.log` files contain the Critical Path Slack, Total Area, and Power numbers so we know where to point our regex parsers.
-- [ ] **Power Analysis Flow Pipeline:** Research and map out the exact command sequence to take the VCS simulation output (SAIF/FSDB file) and feed it into PrimeTime PX (PtPX) or DC to get the accurate dynamic power.
+* **1. Parsing Area (`report_area.rpt`):**
+  * Look for the line indicating total combinatorial and non-combinatorial area.
+  * *Regex:* `r"Total cell area:\s+([0-9.]+)"`
+  * *Python:* `match.group(1)` yields the exact float value.
+* **2. Parsing Timing (`report_timing.rpt`):**
+  * Look for the final slack margin.
+  * *Regex (Slack):* `r"slack\s+\((MET|VIOLATED)\)\s+([-\.0-9]+)"`
+  * *Logic:* If group 1 is "VIOLATED", Gate 2 logic immediately flags the design as failed.
+* **3. Parsing Power (`report_power.rpt`):**
+  * *Regex (Dynamic):* `r"Total Dynamic Power\s+=\s+([0-9.]+)\s+(\w+)"` (Group 2 captures units like `mW` or `uW` for auto-scaling).
+  * *Regex (Leakage):* `r"Cell Leakage Power\s+=\s+([0-9.]+)\s+(\w+)"`
 
-### 5.3 Infrastructure: Translation Layer & Remote Communication
-- [ ] **Derived Parameter Math (`yaml_to_svh.py`):** Document the exact mathematical formulas needed for all Category C parameters (e.g., how to implement `$clog2` correctly in Python).
-- [ ] **Socket Payload Schema:** Define the exact JSON structure that will be sent from the Local Client to the Remote Server (e.g., `{ "job_id": 123, "config_yaml": "..." }`), and the expected format for the return payload.
-- [ ] **Timeout & Error Handling:** Plan how the local script should react if the remote EDA tool hangs, crashes, or fails due to license unavailability.
+---
 
-### 5.4 Algorithm Preparation: Bounding the Design Space
-- [ ] **Define Parameter Constraints:** For every parameter in Category B, explicitly define the absolute Minimum, Maximum, and valid Step Size (e.g., must be a power of 2, or must be an even number). This is essential to prevent the future Bayesian Optimization algorithm from generating mathematically impossible hardware geometries.
+## 6. Pre-Implementation To-Do List [STATUS: PENDING]
+
+### Phase 2: Automation Baseline (Immediate Focus)
+- [ ] **Task 1: The Translation Script.** Write `yaml_to_svh.py` implementing the exact math defined in Section 2.2.
+- [ ] **Task 2: Socket Server.** Write `server.py` and `client.py` using standard Python `socket` and `json` libraries. Implement a basic handshake.
+- [ ] **Task 3: Makefiles.** Standardize the `Makefile` for DC and VCS so they can be executed headlessly without GUI (`-no_gui` flag).
+- [ ] **Task 4: Regex Parsers.** Write `parse_dc.py` and test it against a historically successful `.rpt` file to ensure the regex patterns are robust.
+
+### Phase 3 & 4: Verification & Exploration
+- [ ] Establish the VCS to PtPX SAIF handoff pipeline.
+- [ ] Integrate Bayesian Optimization (e.g., using `Ax` or `BoTorch` libraries).
+- [ ] Define hard boundary constraints (Min/Max values) for every parameter to prevent BO from generating illegal configurations.
+- [ ] **Cross-Path Calibration:** Implement a feedback loop where physical hardware metrics from Path 2 and Path 3 are used to calibrate the analytical models in Path 1, minimizing Correlation Mismatch.
