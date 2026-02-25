@@ -44,7 +44,7 @@ A dedicated Python translation script (`yaml_to_svh.py`) parses the YAML and gen
 | `reram_size` | `RRAM_ROW_ADDR_WIDTH` | $\lceil \log_2(\text{reram size}) \rceil$ |
 | `num_classes` | `CLASS_LABEL_WIDTH` | $\lceil \log_2(\text{num classes}) \rceil$ |
 | `hd_dim` / Spatial Dims | `HV_SEG_WIDTH` | Derivation based on PE array sizing |
-| *Derived Internally* | `WEIGHT_BUS_WIDTH` | $\text{WEIGHT\_MEM\_DATA\_WIDTH} \times \text{NUM RF BANK}$ |
+| *Derived Internally* | `WEIGHT_BUS_WIDTH` | $\text{WEIGHT MEM DATA WIDTH} \times \text{NUM RF BANK}$ |
 
 ---
 
