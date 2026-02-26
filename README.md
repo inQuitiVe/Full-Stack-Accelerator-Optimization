@@ -120,9 +120,8 @@ Implemented in `eda_server_scripts/json_to_svh.py`.
 ```text
 Full-Stack-Accelerator-Optimization/
 │
-├── run_exploration.py                 # Main entry point (CLI args for Path 2/3)
-│
 ├── workspace/                         # Local execution environment
+│   ├── run_exploration.py             # Main entry point (CLI args for Path 2/3)
 │   ├── dse_framework/                 # [Core] DSE Control Center
 │   │   ├── evaluators/                # Evaluator Wrappers (Path 1 & 2)
 │   │   ├── network/                   # Socket Client (Polling Protocol)

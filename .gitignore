@@ -1,0 +1,46 @@
+# ── Hydra outputs ─────────────────────────────────────────────────────────────
+workspace/outputs/
+workspace/HDnn-PIM-Opt/outputs/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── DSE results ───────────────────────────────────────────────────────────────
+dse_results.json
+workspace/dse_results.json
+
+# ── EDA generated artifacts (do not commit synthesis/sim outputs) ─────────────
+eda_server_scripts/dc/synth.tcl
+eda_server_scripts/dc/synth_dse.tcl
+*.rpt
+*.log
+*.saif
+*.vcd
+*.fsdb
+simv
+simv.daidir/
+csrc/
+
+# ── Hex data dumps (generated at runtime by path1_software.dump_hex_data) ─────
+*.hex
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

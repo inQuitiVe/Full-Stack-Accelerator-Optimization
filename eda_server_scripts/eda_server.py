@@ -1,13 +1,23 @@
 """
 EDA Socket Server — Deploy on the licensed EDA host machine.
 
+Server deployment layout assumed:
+  ~/workspace/
+    ├── fsl-hd/                ← existing hardware project (RTL, libs, reports)
+    └── full-stack-opt/        ← THIS script lives here
+        ├── eda_server.py
+        ├── json_to_svh.py
+        ├── parsers/
+        ├── dc/                ← TCL templates
+        └── Makefile           ← invokes EDA tools with CWD = ../fsl-hd/
+
 Responsibilities:
   - Listen for incoming JSON task payloads from the Client (Docker).
   - Enqueue tasks and execute them serially (one DC license).
-  - Run json_to_svh.py -> make synth -> parse_dc.py entirely on-server.
+  - Run json_to_svh.py → make synth → parse_dc.py entirely on-server.
   - Return a compact JSON result dict; never transfer .rpt or .fsdb files.
   - Support a Polling protocol so Client does not need a long-lived TCP connection.
-  - (Path 3) Accept optional hex_data payload and write to hardware/data/
+  - (Path 3) Accept optional hex_data payload and write to fsl-hd/tb/data/
     before running make sim → VCS gate-level simulation.
 
 Protocol (all messages newline-delimited JSON):
@@ -45,9 +55,13 @@ logger = logging.getLogger("eda_server")
 HOST = "0.0.0.0"
 PORT = 5000
 SYNTH_TIMEOUT_SECONDS = 1800          # 30-minute hard timeout for DC synthesis
-WORK_DIR = Path(__file__).parent      # Server script directory
-MAKEFILE_DIR = WORK_DIR / "hardware"  # Directory containing the synthesis Makefile
-REPORTS_DIR = MAKEFILE_DIR / "reports"
+
+# This server script lives in full-stack-opt/; hardware project is the sibling fsl-hd/.
+WORK_DIR    = Path(__file__).parent            # ~/workspace/full-stack-opt/
+FSL_HD_DIR  = WORK_DIR.parent / "fsl-hd"      # ~/workspace/fsl-hd/
+MAKEFILE_DIR = WORK_DIR                        # Makefile lives in full-stack-opt/
+REPORTS_DIR = FSL_HD_DIR / "reports"           # DC/VCS reports written to fsl-hd/reports/
+TB_DATA_DIR = FSL_HD_DIR / "tb" / "data"      # hex data for VCS testbench
 
 # ── Job Registry & Queue ──────────────────────────────────────────────────────
 task_queue: queue.Queue = queue.Queue()
@@ -59,13 +73,16 @@ registry_lock = threading.Lock()
 
 def _write_hex_data(hex_data: Dict[str, str]) -> None:
     """
-    Write hex data strings (from the Client JSON payload) to the server's
-    hardware/data/ directory so the VCS Testbench can read them via $readmemh.
+    Write hex data strings (from the Client JSON payload) to fsl-hd/tb/data/
+    so the VCS Testbench (fsl-hd/tb/tb_top.sv) can read them via $readmemh.
+
+    Paths in tb_macros.svh are set to "tb/data/*.hex" (relative to fsl-hd/)
+    because simv is invoked from fsl-hd/.
 
     Expected keys: "inputs", "labels", "weights".
     Missing keys are silently skipped (allows partial updates).
     """
-    data_dir = MAKEFILE_DIR / "data"
+    data_dir = TB_DATA_DIR
     data_dir.mkdir(parents=True, exist_ok=True)
 
     file_map = {

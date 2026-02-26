@@ -1,10 +1,14 @@
 """
 run_exploration.py — Entry point for the Full-Stack DSE Framework.
 
-Usage:
-  python run_exploration.py                     # Path 1 only (software simulation)
-  python run_exploration.py --path2             # Path 1 + Path 2 (EDA synthesis)
-  python run_exploration.py --path2 --eda-host 192.168.1.100 --eda-port 5000
+Usage (from repo root):
+  python workspace/run_exploration.py                     # Path 1 only (software simulation)
+  python workspace/run_exploration.py --path2             # Path 1 + Path 2 (EDA synthesis)
+  python workspace/run_exploration.py --path2 --eda-host 192.168.1.100 --eda-port 5000
+
+Usage (from workspace/ directory):
+  python run_exploration.py
+  python run_exploration.py --path2
 
 This script bootstraps the Hydra config system, then delegates to bo_engine.run_bo().
 """
@@ -25,9 +29,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("run_exploration")
 
-# Add workspace paths to sys.path
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-_WORKSPACE = os.path.join(_REPO_ROOT, "workspace")
+# This script lives inside workspace/; use its directory as the workspace root.
+_WORKSPACE = os.path.dirname(os.path.abspath(__file__))
 _HDNN_ROOT = os.path.join(_WORKSPACE, "HDnn-PIM-Opt")
 for _p in [_WORKSPACE, _HDNN_ROOT]:
     if _p not in sys.path:
@@ -35,7 +38,11 @@ for _p in [_WORKSPACE, _HDNN_ROOT]:
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="HDnn-PIM DSE Framework")
+    """
+    Parse custom CLI flags and strip them from sys.argv so Hydra does not
+    see unrecognised arguments.  Must be called before @hydra.main runs.
+    """
+    parser = argparse.ArgumentParser(description="HDnn-PIM DSE Framework", add_help=False)
     parser.add_argument(
         "--path2",
         action="store_true",
@@ -53,13 +60,19 @@ def _parse_args():
         default=5000,
         help="EDA Server TCP port",
     )
-    return parser.parse_args()
+    args, remaining = parser.parse_known_args()
+    # Leave only the script name + Hydra-compatible args in sys.argv
+    sys.argv = [sys.argv[0]] + remaining
+    return args
 
 
-@hydra.main(version_base=None, config_path="workspace/conf", config_name="config")
+# Parse and strip our custom flags before Hydra initialises.
+_CLI_ARGS = _parse_args()
+
+
+@hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
-    args = _parse_args()
-    cwd = hydra.utils.get_original_cwd()
+    args = _CLI_ARGS
 
     logger.info("=" * 60)
     logger.info("Full-Stack Accelerator DSE Framework")
@@ -76,7 +89,7 @@ def main(cfg: DictConfig) -> None:
         data_args=OmegaConf.to_container(cfg["data"], resolve=True),
         training_args=OmegaConf.to_container(cfg["training"], resolve=True),
         hardware_args=OmegaConf.to_container(cfg["hardware"], resolve=True),
-        cwd=os.path.join(cwd, "workspace", "HDnn-PIM-Opt"),
+        cwd=_HDNN_ROOT,
         use_path2=args.path2,
         eda_host=args.eda_host,
         eda_port=args.eda_port,

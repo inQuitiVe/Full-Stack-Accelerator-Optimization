@@ -4,17 +4,17 @@ bo_engine.py — Multi-fidelity Bayesian Optimization Engine.
 Orchestrates the full DSE loop:
   1. Ax/BoTorch generates the next parameter configuration to evaluate.
   2. Path 1 (software) is evaluated locally.
-     - Gate 1: accuracy below threshold → mark_trial_failed(), skip.
+     - Gate 1: accuracy below threshold → log_trial_failure(), skip.
   3. (Optional) Path 2 (hardware synthesis) evaluated via EDA Server.
      - Gate 2 (handled server-side, result status = "timing_violated") →
-       mark_trial_failed().
+       log_trial_failure().
   4. Raw metrics are normalised via DynamicNormalizer and reported to Ax.
   5. Hypervolume is tracked after every iteration.
 
 Key design decisions (from architecture discussions):
   - kron parameter: REMOVED. No branch logic for Kronecker encoders.
   - cnn flag: treated as a fixed environment constant (set in config, not BO).
-  - Failed trials: use ax_client.mark_trial_failed(), never inject penalty values.
+  - Failed trials: use ax_client.log_trial_failure(), never inject penalty values.
   - Normalisation: DynamicNormalizer with running max as the base.
   - Objective: maximise Hypervolume (multi-objective qNEHVI).
 """
@@ -58,16 +58,16 @@ def _build_ax_client(
     Objectives are set to maximise Hypervolume across all four metrics.
     """
     from ax.modelbridge.registry import Models as _Models
-    from dse_framework.flow.acqfManagerFactory import acqf_factory  # noqa: F401 – optional
 
     try:
+        from dse_framework.flow.acqfManagerFactory import acqf_factory
         botorch_acqf_class = acqf_factory(acqf_name)
         model_kwargs = {
             "torch_device": "cpu",
             "botorch_acqf_class": botorch_acqf_class,
         }
     except Exception:
-        # Fall back to default qNEHVI if custom factory fails
+        # Fall back to default qNEHVI if custom factory or module is unavailable
         model_kwargs = {"torch_device": "cpu"}
 
     cli = AxClient(
@@ -200,7 +200,7 @@ def run_bo(
             )
         except Exception as exc:
             logger.error(f"[Trial {trial_idx}] Path 1 failed: {exc}")
-            cli.mark_trial_failed(trial_idx)
+            cli.log_trial_failure(trial_idx)
             continue
 
         accuracy = p1_result["accuracy"]
@@ -211,7 +211,7 @@ def run_bo(
                 f"[Trial {trial_idx}] GATE 1 FAILED: accuracy={accuracy:.4f} "
                 f"< threshold={constraints.get('accuracy', 0.0):.4f}"
             )
-            cli.mark_trial_failed(trial_idx)
+            cli.log_trial_failure(trial_idx)
             continue
 
         # ── Path 2 (optional): Hardware Synthesis ────────────────────────────
@@ -223,7 +223,7 @@ def run_bo(
             )
             if p2_result["status"] != "success":
                 logger.warning(f"[Trial {trial_idx}] GATE 2 FAILED: Path 2 returned {p2_result['status']}.")
-                cli.mark_trial_failed(trial_idx)
+                cli.log_trial_failure(trial_idx)
                 continue
             raw_metrics = p2_result["metrics"]
         else:
