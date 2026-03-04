@@ -76,51 +76,71 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False)
 
     Path 3 uses LFSR-based testbenches (tb_core_timing.sv or tb_hd_top_timing.sv)
     selected by top_module in params. No hex data transfer is required.
+
+    IMPORTANT:
+      - For Path 2 (run_path3=False), we always run DC synthesis (+parse DC reports).
+      - For Path 3 (run_path3=True), we **reuse** the most recent DC artifacts for
+        this design point and only run VCS + PtPX (no second DC call), while still
+        re-parsing DC reports for timing/area consistency.
+
+    Because the server processes jobs serially (single worker thread) and Path 3
+    jobs are submitted immediately after their corresponding Path 2 jobs, the DC
+    reports / netlist in REPORTS_DIR are guaranteed to belong to the same design.
     """
     _set_status(job_id, "running")
     synth_mode = str(params.get("synth_mode", "slow")).strip().lower()
     top_module = str(params.get("top_module", "core")).strip().lower()
+
+    phase_label = "Path 3 (VCS+PtPX only, reuse DC)" if run_path3 else "Path 2 (synth only)"
     logger.info(
-        f"[Job {job_id}] Starting {'Path 3 (VCS+PtPX)' if run_path3 else 'Path 2 (synth only)'} "
+        f"[Job {job_id}] Starting {phase_label} "
         f"[synth_mode={synth_mode}, top_module={top_module}] params: {params}"
     )
 
     try:
-        # Step 1: Translate JSON params → config_macros.svh + synth_dse.tcl
-        json_to_svh_script = WORK_DIR / "json_to_svh.py"
-        translate_result = subprocess.run(
-            ["python3", str(json_to_svh_script)],
-            input=json.dumps(params),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=60,
-        )
-        if translate_result.returncode != 0:
-            err = (translate_result.stderr or translate_result.stdout or "").strip()
-            raise RuntimeError("json_to_svh.py failed: " + err)
-        logger.info(f"[Job {job_id}] Translation complete.")
-
-        # Step 2: Run Design Compiler synthesis
-        # Pass SYNTH_MODE and TOP_MODULE to the Makefile for correct TCL selection
-        synth_result = subprocess.run(
-            ["make", "synth",
-             "SYNTH_MODE=" + synth_mode,
-             "TOP_MODULE=" + top_module],
-            cwd=str(MAKEFILE_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=SYNTH_TIMEOUT_SECONDS,
-        )
-        if synth_result.returncode != 0:
-            err_out = (synth_result.stderr or synth_result.stdout or "")[-2000:]
-            raise RuntimeError(
-                "make synth failed (exit %s):\n%s" % (synth_result.returncode, err_out)
+        if not run_path3:
+            # ── Path 2: fresh DC synthesis ──────────────────────────────────────
+            # Step 1: Translate JSON params → config_macros.svh + synth_dse.tcl
+            json_to_svh_script = WORK_DIR / "json_to_svh.py"
+            translate_result = subprocess.run(
+                ["python3", str(json_to_svh_script)],
+                input=json.dumps(params),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=60,
             )
-        logger.info(f"[Job {job_id}] Synthesis complete.")
+            if translate_result.returncode != 0:
+                err = (translate_result.stderr or translate_result.stdout or "").strip()
+                raise RuntimeError("json_to_svh.py failed: " + err)
+            logger.info(f"[Job {job_id}] Translation complete.")
 
-        # Step 3: Parse DC report files
+            # Step 2: Run Design Compiler synthesis
+            # Pass SYNTH_MODE and TOP_MODULE to the Makefile for correct TCL selection
+            synth_result = subprocess.run(
+                ["make", "synth",
+                 "SYNTH_MODE=" + synth_mode,
+                 "TOP_MODULE=" + top_module],
+                cwd=str(MAKEFILE_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=SYNTH_TIMEOUT_SECONDS,
+            )
+            if synth_result.returncode != 0:
+                err_out = (synth_result.stderr or synth_result.stdout or "")[-2000:]
+                raise RuntimeError(
+                    "make synth failed (exit %s):\n%s" % (synth_result.returncode, err_out)
+                )
+            logger.info(f"[Job {job_id}] Synthesis complete.")
+        else:
+            # ── Path 3: reuse existing DC artifacts ────────────────────────────
+            logger.info(
+                f"[Job {job_id}] Path 3: reusing existing DC netlist/reports in {REPORTS_DIR}, "
+                "skipping make synth."
+            )
+
+        # Step 3: Parse DC report files (both Path 2 and Path 3 need these metrics)
         metrics = parse_dc_reports(str(REPORTS_DIR))
         logger.info(f"[Job {job_id}] Parsed DC metrics: {metrics}")
 

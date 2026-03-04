@@ -28,7 +28,7 @@
 //    - Simulation time (ns) at end of each phase
 //    - Total clock cycles consumed
 // ============================================================================
-`timescale 1ns/1ps
+// `timescale 1ns/1ps
 `include "param_opt.vh"
 
 module tb_hd_top_timing;

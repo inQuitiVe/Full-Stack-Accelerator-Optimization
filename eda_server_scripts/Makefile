@@ -91,6 +91,7 @@ sim: $(NETLIST) $(TB_DIR)/tb_macros.svh $(TB_FILE)
 	@mkdir -p $(REPORTS)
 	cd $(FSL_HD) && $(VCS_CMD) -full64 -sverilog \
 	    +define+GATE_SIM \
+		/opt/lib/tsmc/211005//tcbn40ulpbwp40_c170815_130d/TSMCHOME/digital/Front_End/verilog/tcbn40ulpbwp40_c170815_130a/tcbn40ulpbwp40_c170815.v \
 	    $(NETLIST) \
 	    $(TB_FILE) \
 	    +incdir+verilog/include \

@@ -35,7 +35,7 @@
 //        They are used in non-overlapping phases (features are written only
 //        after ENC_PRELOAD has finished), so there is no functional conflict.
 // =============================================================================
-`timescale 1ns/1ps
+// `timescale 1ns/1ps
 `include "param_opt.vh"
 
 module tb_core_timing;
