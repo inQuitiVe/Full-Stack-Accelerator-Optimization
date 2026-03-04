@@ -69,7 +69,7 @@ optimization:
   # Leave as null to finish at the last iteration.
   threshold_schedule_final_iter: 39
   constraints:
-    accuracy: 0.79
+    accuracy: 0.5
     power: 0.5
     performance: 0.5
     area: 0.2
