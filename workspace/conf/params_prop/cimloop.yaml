@@ -184,8 +184,8 @@
 - name: encoder_y_dim
   type: choice
   values:
-    # - 8
-    - 16
+    - 8
+    # - 16
   value_type: int
 - name: inner_dim
   type: choice
@@ -195,12 +195,14 @@
     # - 4096
   value_type: int
 
-# Synthesis strategy profile — controls DC compile_ultra flags on the EDA Server.
-# Each value maps to a distinct set of TCL commands in json_to_svh.py.
+# ── Synthesis Optimization Parameters (EDA Server) ───────────────────────────
+#
+# synth_profile: High-level strategy preset
 #   balanced_default   : insert_clock_gating + compile_ultra (standard)
 #   timing_aggressive  : compile_ultra -retime -timing_high_effort_script
 #   power_aggressive   : insert_clock_gating + compile_ultra -area_high_effort_script
 #   exact_map          : compile_ultra -exact_map -no_autoungroup (preserves hierarchy)
+#
 - name: synth_profile
   type: choice
   values:
@@ -208,4 +210,46 @@
     - timing_aggressive
     - power_aggressive
     - exact_map
+  value_type: str
+
+# syn_map_effort: Mapping effort during compile_ultra (for iterative tuning)
+#   Controls optimization quality during the mapping phase: low/medium/high
+#
+- name: syn_map_effort
+  type: choice
+  values:
+    - low
+    - medium
+    - high
+  value_type: str
+
+# syn_opt_effort: Optimization effort (for iterative tuning)
+#   Controls optimization quality during the optimization phase: low/medium/high
+#
+- name: syn_opt_effort
+  type: choice
+  values:
+    - low
+    - medium
+    - high
+  value_type: str
+
+# enable_retime: Enable register retiming (beyond timing_aggressive's -retime)
+#   Additional control for timing-critical designs
+#
+- name: enable_retime
+  type: choice
+  values:
+    - 'false'
+    - 'true'
+  value_type: str
+
+# enable_gate_clock: Enable gate-level clock gating (independent of insert_clock_gating)
+#   For exploring pure gate-level gating without RTL-level insertion
+#
+- name: enable_gate_clock
+  type: choice
+  values:
+    - 'false'
+    - 'true'
   value_type: str

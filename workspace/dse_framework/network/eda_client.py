@@ -74,7 +74,7 @@ def evaluate_remote(
     port: int = DEFAULT_PORT,
     poll_interval: float = POLL_INTERVAL_S,
     timeout: float = CLIENT_TIMEOUT_S,
-    hex_data: Optional[Dict[str, str]] = None,
+    run_path3: bool = False,
 ) -> Dict[str, Any]:
     """
     Submit a hardware evaluation task to the remote EDA Server and wait (via
@@ -82,15 +82,17 @@ def evaluate_remote(
 
     Args:
         params:        Hardware parameter dictionary (the full SW params JSON).
+                       Must include 'top_module' ("core" or "hd_top") and
+                       'synth_mode' ("fast" or "slow") if Path 3 is requested.
         job_id:        Unique integer job identifier (should match Ax trial index).
         host:          EDA Server hostname or IP.
         port:          EDA Server TCP port.
         poll_interval: Seconds between status poll requests.
         timeout:       Maximum seconds to wait before declaring failure.
-        hex_data:      Optional dict with keys "inputs", "labels", "weights"
-                       (plaintext hex strings). When provided (Path 3 only),
-                       the server writes these to hardware/data/ before running
-                       VCS simulation. Set to None for Path 2 (synthesis only).
+        run_path3:     If True, instruct the server to run gate-level simulation
+                       (VCS + PtPX) after synthesis. The testbench (tb_core_timing.sv
+                       or tb_hd_top_timing.sv) uses LFSR data — no hex transfer needed.
+                       If False (default), only synthesis (Path 2) is performed.
 
     Returns:
         A dict with at minimum:
@@ -101,19 +103,18 @@ def evaluate_remote(
     Raises:
         EDAClientError: On network-level failures (cannot connect, protocol error).
     """
-    # Step 1: Submit the task (include hex_data payload only when provided)
+    # Step 1: Submit the task
     submit_payload: Dict[str, Any] = {
         "action": "submit",
         "job_id": job_id,
         "params": params,
+        "run_path3": run_path3,
     }
-    if hex_data is not None:
-        submit_payload["hex_data"] = hex_data
+    if run_path3:
+        top_module = params.get("top_module", "core")
         logger.info(
-            f"[Job {job_id}] Attaching hex_data payload "
-            f"(inputs={len(hex_data.get('inputs',''))} chars, "
-            f"labels={len(hex_data.get('labels',''))} chars, "
-            f"weights={len(hex_data.get('weights',''))} chars)."
+            f"[Job {job_id}] Path 3 requested — top_module={top_module!r}. "
+            "Server will run VCS + PtPX with LFSR testbench (no hex transfer)."
         )
     try:
         submit_response = _send_and_receive(

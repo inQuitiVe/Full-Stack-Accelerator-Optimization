@@ -1,3 +1,1 @@
-cd HDnn-PIM-Opt/
-python3 -m sim --config-path ../../conf
-cd ../
+python3 run_exploration.py --path2 --eda-host 132.239.17.21 --eda-port 5000

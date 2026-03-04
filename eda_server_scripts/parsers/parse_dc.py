@@ -18,8 +18,6 @@ Expected report files in `reports_dir/`:
   report_power.rpt
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 from typing import Any, Dict
@@ -54,11 +52,28 @@ def _parse_area(report_text: str) -> float:
     Example line:
       Total cell area:             15234.567890
     """
-    pattern = re.compile(r"Total cell area:\s+([0-9.]+)")
+    # Primary: standard DC format
+    pattern = re.compile(r"Total cell area:\s+([0-9.]+)", re.IGNORECASE)
     match = pattern.search(report_text)
-    if not match:
-        raise ValueError("Could not find 'Total cell area' in area report.")
-    return float(match.group(1))
+    if match:
+        return float(match.group(1))
+
+    # Fallback: sum Combinational + Noncombinational + Macro/Black Box
+    comb = re.search(r"Combinational area:\s+([0-9.]+)", report_text, re.IGNORECASE)
+    noncomb = re.search(r"Noncombinational area:\s+([0-9.]+)", report_text, re.IGNORECASE)
+    macro = re.search(r"Macro/Black Box area:\s+([0-9.]+)", report_text, re.IGNORECASE)
+    if comb and noncomb and macro:
+        return (
+            float(comb.group(1)) + float(noncomb.group(1)) + float(macro.group(1))
+        )
+
+    # Helpful error with report snippet
+    snippet = report_text[:1500] if len(report_text) > 1500 else report_text
+    raise ValueError(
+        "Could not find 'Total cell area' in area report. "
+        "Ensure DC synthesis completed successfully. "
+        "Report preview:\n---\n%s\n---" % (snippet or "(empty file)")
+    )
 
 
 def _parse_timing(report_text: str) -> Dict[str, float]:
@@ -86,14 +101,25 @@ def _parse_timing(report_text: str) -> Dict[str, float]:
     if status == "VIOLATED":
         slack_ns = -abs(slack_ns)
 
-    # Clock period — try to extract from the "clock ... (rise edge)" line
+    # Clock period — extract from "clock ... (rise edge)" and/or "(fall edge)" lines.
+    # DC reports: launch is often rise 0.00; capture can be rise (period) or fall (half-period).
     period_ns: float = 0.0
-    period_pattern = re.compile(
-        r"clock\s+\S+\s+\(rise edge\)\s+([0-9.]+)\s+([0-9.]+)"
+    rise_pattern = re.compile(
+        r"clock\s+\S+\s+\(rise\s+edge\)\s+([0-9.]+)\s+([0-9.]+)"
     )
-    period_match = period_pattern.search(report_text)
-    if period_match:
-        period_ns = float(period_match.group(1))
+    fall_pattern = re.compile(
+        r"clock\s+\S+\s+\(fall\s+edge\)\s+([0-9.]+)\s+([0-9.]+)"
+    )
+    rise_matches = rise_pattern.findall(report_text)
+    fall_matches = fall_pattern.findall(report_text)
+    path_from_rise = max((float(m[1]) for m in rise_matches), default=0.0)
+    path_from_fall = max((float(m[1]) for m in fall_matches), default=0.0)
+    if path_from_rise > 0:
+        period_ns = path_from_rise
+    elif path_from_fall > 0:
+        period_ns = 2.0 * path_from_fall
+    else:
+        period_ns = path_from_rise if path_from_rise >= path_from_fall else 2.0 * path_from_fall
 
     return {"timing_slack_ns": slack_ns, "clock_period_ns": period_ns}
 

@@ -1,5 +1,9 @@
 # =============================================================================
-# synth_template.tcl — Design Compiler Synthesis Script Template (SLOW MODE)
+# synth_template_fast.tcl — Design Compiler Synthesis Script Template (FAST MODE)
+#
+# Fast mode: PatterNet and static SRAM/interface modules are treated as black
+# boxes (not re-synthesized).  Only the variable HD core modules are analyzed,
+# resulting in significantly shorter DC runtime.
 #
 # Deployment target: ~/workspace/fsl-hd/tcl/synth_dse.tcl
 #   (written at runtime by json_to_svh.py from this template)
@@ -92,34 +96,23 @@ define_design_lib WORK -path reports/dc_work
 analyze -format sverilog -lib WORK {config_macros.svh}
 analyze -format sverilog -lib WORK {param.vh}
 
-# 2) RTL sources — explicit white-list to match original flow.
-# These filenames are resolved via search_path (verilog/hdl and $PNET_PATH/verilog).
+# 2) RTL sources — explicit white-list of dynamic files that depend on macro parameters.
+# NOTE: Static files (PatterNet, SRAMs, chip_interface) are assumed to be synthesized
+# previously and will be read as .ddc or .db files below.
 set rtl_files [ list \
     core.sv \
-    chip_interface.sv \
     hd_top.sv \
     hd_enc.sv \
     hd_search.sv \
     hd_train.sv \
-    cdc_fifo.sv \
-    rf_sp_32x32.sv \
-    sram_sp_256x64.sv \
-    sram_sp_4096x64.sv \
     sub_module.sv \
-    pulse_gen.syn.v \
-    top.sv \
-    pnet_hd_iface.sv \
-    ctrl.sv \
-    pe_array.sv \
-    row_bus.sv \
-    col_bus.sv \
-    bf16.sv \
-    sram520x36.sv \
-    sram8192x16.sv \
-    sram2048x16.sv \
-    rfsp136x16.sv \
 ]
 analyze -format sverilog -lib WORK $rtl_files
+
+# 3) Read pre-compiled static modules (Fast Mode)
+# This requires you to have compiled PatterNet, SRAM wrappers, and chip_interface into DDC format
+# e.g., read_ddc reports/static_modules.ddc
+# For now, if you haven't actually compiled them, link might fail, but this is the fast mode template.
 
 # ── Elaborate ─────────────────────────────────────────────────────────────────
 elaborate $top_module

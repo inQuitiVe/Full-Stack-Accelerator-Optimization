@@ -49,6 +49,7 @@ def evaluate_path1(
     hardware_args: Dict[str, Any],
     cwd: str,
     logger_override=None,
+    evaluator_logger=None,
 ) -> Dict[str, float]:
     """
     Run the full Path 1 software simulation for a single parameter configuration.
@@ -59,7 +60,9 @@ def evaluate_path1(
         training_args:  Training hyperparameters (epochs, lr, devices, etc.)
         hardware_args:  Hardware config flags (type="cimloop", cnn=True, etc.)
         cwd:            Absolute path to the HDnn-PIM-Opt working directory.
-        logger_override: Optional logger to use; defaults to module logger.
+        logger_override: Optional logger for [Path1] result output; defaults to module logger.
+        evaluator_logger: Optional logger for sim/Evaluator internals (e.g. image size).
+                         If WARNING, suppresses verbose sim logs.
 
     Returns:
         Canonical metrics dict with raw (un-normalised) values.
@@ -68,6 +71,7 @@ def evaluate_path1(
         RuntimeError:   If the simulation fails or returns unexpected shapes.
     """
     _log = logger_override or logger
+    _eval_log = evaluator_logger if evaluator_logger is not None else _log
 
     try:
         from sim.evaluator import Evaluator
@@ -77,10 +81,10 @@ def evaluate_path1(
             f"Attempted path: {_HDNN_ROOT}\nOriginal error: {exc}"
         ) from exc
 
-    evaluator = Evaluator(data_args, training_args, hardware_args, cwd, _log)
+    evaluator = Evaluator(data_args, training_args, hardware_args, cwd, _eval_log)
 
     # The Evaluator.evaluate() API expects a list (one item per GPU worker)
-    results = evaluator.evaluate([params], _log)
+    results = evaluator.evaluate([params], _eval_log)
 
     if not results:
         raise RuntimeError("Evaluator returned empty results list.")
@@ -100,11 +104,21 @@ def evaluate_path1(
         f"timing={timing_us:.3f}us, area={area_mm2:.4f}mm^2"
     )
 
+    # Cache hd_model for Path 2 RRAM Cimloop (same as dump_hex_data)
+    hd_model = None
+    try:
+        accuracy_eval = evaluator.metric_managers[0].accuracy_evaluator
+        hd_factory = accuracy_eval.hd_factory
+        hd_model = hd_factory.create_neurosim()
+    except (AttributeError, IndexError, TypeError) as e:
+        _log.debug("Path1: could not cache hd_model for Path 2: %s", e)
+
     return {
         "accuracy": accuracy,
         "energy_uj": energy_uj,
         "timing_us": timing_us,
         "area_mm2": area_mm2,
+        "hd_model": hd_model,
     }
 
 

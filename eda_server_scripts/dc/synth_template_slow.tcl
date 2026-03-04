@@ -1,5 +1,8 @@
 # =============================================================================
-# synth_template.tcl — Design Compiler Synthesis Script Template (SLOW MODE)
+# synth_template_slow.tcl — Design Compiler Synthesis Script Template (SLOW MODE)
+#
+# Slow mode: all RTL sources (including PatterNet, SRAMs, chip_interface) are
+# analyzed and synthesized from scratch in DC.
 #
 # Deployment target: ~/workspace/fsl-hd/tcl/synth_dse.tcl
 #   (written at runtime by json_to_svh.py from this template)

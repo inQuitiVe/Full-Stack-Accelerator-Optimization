@@ -8,8 +8,8 @@ Server deployment layout assumed:
         ├── eda_server.py
         ├── json_to_svh.py
         ├── parsers/
-        ├── dc/                ← TCL templates
-        └── Makefile           ← invokes EDA tools with CWD = ../fsl-hd/
+        ├── dc/                ← TCL templates (synth_template.tcl / synth_template_fast.tcl)
+        └── Makefile           ← invokes EDA tools with CWD = fsl-hd/
 
 Responsibilities:
   - Listen for incoming JSON task payloads from the Client (Docker).
@@ -17,19 +17,19 @@ Responsibilities:
   - Run json_to_svh.py → make synth → parse_dc.py entirely on-server.
   - Return a compact JSON result dict; never transfer .rpt or .fsdb files.
   - Support a Polling protocol so Client does not need a long-lived TCP connection.
-  - (Path 3) Accept optional hex_data payload and write to fsl-hd/tb/data/
-    before running make sim → VCS gate-level simulation.
+  - (Path 3) Run VCS gate-level simulation using LFSR-based testbench when
+    run_path3=True is set in the payload.  No hex data transfer is required;
+    the testbench (tb_core_timing.sv or tb_hd_top_timing.sv) auto-generates LFSR stimuli.
+    Testbench selection is controlled by top_module inside params.
 
 Protocol (all messages newline-delimited JSON):
-  Submit (Path 2): {"action": "submit",  "job_id": <int>, "params": {...}}
-  Submit (Path 3): {"action": "submit",  "job_id": <int>, "params": {...},
-                    "hex_data": {"inputs": "...", "labels": "...", "weights": "..."}}
+  Submit (Path 2): {"action": "submit", "job_id": <int>, "params": {...}}
+  Submit (Path 3): {"action": "submit", "job_id": <int>, "params": {...}, "run_path3": true}
   Poll:            {"action": "status",  "job_id": <int>}
-  Reply:           {"job_id": <int>, "status": "accepted"|"queued"|"running"|"success"|"error"|"timeout",
-                    "metrics": {...} | "reason": "..."}
+  Reply (success): {"job_id": <int>, "status": "success", "metrics": {...}}
+  Reply (failure): {"job_id": <int>, "status": "error"|"timeout"|"timing_violated",
+                    "reason": "..."}
 """
-
-from __future__ import annotations
 
 import json
 import logging
@@ -57,11 +57,11 @@ PORT = 5000
 SYNTH_TIMEOUT_SECONDS = 1800          # 30-minute hard timeout for DC synthesis
 
 # This server script lives in full-stack-opt/; hardware project is the sibling fsl-hd/.
-WORK_DIR    = Path(__file__).parent            # ~/workspace/full-stack-opt/
-FSL_HD_DIR  = WORK_DIR.parent / "fsl-hd"      # ~/workspace/fsl-hd/
+# Resolve to absolute paths so report lookup works regardless of process cwd.
+WORK_DIR    = Path(__file__).resolve().parent   # ~/workspace/full-stack-opt/
+FSL_HD_DIR  = (WORK_DIR.parent / "fsl-hd").resolve()  # ~/workspace/fsl-hd/
 MAKEFILE_DIR = WORK_DIR                        # Makefile lives in full-stack-opt/
-REPORTS_DIR = FSL_HD_DIR / "reports"           # DC/VCS reports written to fsl-hd/reports/
-TB_DATA_DIR = FSL_HD_DIR / "tb" / "data"      # hex data for VCS testbench
+REPORTS_DIR = (FSL_HD_DIR / "reports").resolve()  # DC/VCS reports written to fsl-hd/reports/
 
 # ── Job Registry & Queue ──────────────────────────────────────────────────────
 task_queue: queue.Queue = queue.Queue()
@@ -69,75 +69,54 @@ job_registry: Dict[int, Dict[str, Any]] = {}
 registry_lock = threading.Lock()
 
 
-# ── Worker Thread ─────────────────────────────────────────────────────────────
-
-def _write_hex_data(hex_data: Dict[str, str]) -> None:
-    """
-    Write hex data strings (from the Client JSON payload) to fsl-hd/tb/data/
-    so the VCS Testbench (fsl-hd/tb/tb_top.sv) can read them via $readmemh.
-
-    Paths in tb_macros.svh are set to "tb/data/*.hex" (relative to fsl-hd/)
-    because simv is invoked from fsl-hd/.
-
-    Expected keys: "inputs", "labels", "weights".
-    Missing keys are silently skipped (allows partial updates).
-    """
-    data_dir = TB_DATA_DIR
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    file_map = {
-        "inputs":  data_dir / "inputs.hex",
-        "labels":  data_dir / "labels.hex",
-        "weights": data_dir / "weights.hex",
-    }
-    for key, path in file_map.items():
-        if key in hex_data and hex_data[key]:
-            path.write_text(hex_data[key], encoding="utf-8")
-            logger.info(f"[hex_data] Written {path.name} ({len(hex_data[key])} chars)")
-
-
-def _run_synthesis(job_id: int, params: Dict[str, Any], hex_data: Optional[Dict[str, str]] = None) -> None:
+def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False) -> None:
     """
     Called from the worker thread: translate params, run DC synthesis, parse results.
-    When hex_data is provided (Path 3), also runs VCS gate-level simulation.
+    When run_path3=True, also runs VCS gate-level simulation + PtPX power analysis.
+
+    Path 3 uses LFSR-based testbenches (tb_core_timing.sv or tb_hd_top_timing.sv)
+    selected by top_module in params. No hex data transfer is required.
     """
     _set_status(job_id, "running")
-    is_path3 = hex_data is not None
-    logger.info(f"[Job {job_id}] Starting {'Path 3 (sim)' if is_path3 else 'Path 2 (synth)'} with params: {params}")
+    synth_mode = str(params.get("synth_mode", "slow")).strip().lower()
+    top_module = str(params.get("top_module", "core")).strip().lower()
+    logger.info(
+        f"[Job {job_id}] Starting {'Path 3 (VCS+PtPX)' if run_path3 else 'Path 2 (synth only)'} "
+        f"[synth_mode={synth_mode}, top_module={top_module}] params: {params}"
+    )
 
     try:
-        # Step 0 (Path 3 only): Write hex data to hardware/data/ before translation
-        if is_path3:
-            _write_hex_data(hex_data)
-            logger.info(f"[Job {job_id}] Hex data written to hardware/data/.")
-
-        # Step 1: Translate JSON params → config_macros.svh + synth.tcl + tb_macros.svh
+        # Step 1: Translate JSON params → config_macros.svh + synth_dse.tcl
         json_to_svh_script = WORK_DIR / "json_to_svh.py"
         translate_result = subprocess.run(
-            ["python", str(json_to_svh_script)],
+            ["python3", str(json_to_svh_script)],
             input=json.dumps(params),
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=60,
         )
         if translate_result.returncode != 0:
-            raise RuntimeError(
-                f"json_to_svh.py failed: {translate_result.stderr.strip()}"
-            )
+            err = (translate_result.stderr or translate_result.stdout or "").strip()
+            raise RuntimeError("json_to_svh.py failed: " + err)
         logger.info(f"[Job {job_id}] Translation complete.")
 
-        # Step 2: Run Design Compiler via Makefile
+        # Step 2: Run Design Compiler synthesis
+        # Pass SYNTH_MODE and TOP_MODULE to the Makefile for correct TCL selection
         synth_result = subprocess.run(
-            ["make", "synth"],
+            ["make", "synth",
+             "SYNTH_MODE=" + synth_mode,
+             "TOP_MODULE=" + top_module],
             cwd=str(MAKEFILE_DIR),
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=SYNTH_TIMEOUT_SECONDS,
         )
         if synth_result.returncode != 0:
+            err_out = (synth_result.stderr or synth_result.stdout or "")[-2000:]
             raise RuntimeError(
-                f"make synth failed (exit {synth_result.returncode}):\n"
-                f"{synth_result.stderr[-2000:]}"
+                "make synth failed (exit %s):\n%s" % (synth_result.returncode, err_out)
             )
         logger.info(f"[Job {job_id}] Synthesis complete.")
 
@@ -151,41 +130,51 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], hex_data: Optional[Dict[
             logger.warning(f"[Job {job_id}] Timing VIOLATED (slack={metrics['timing_slack_ns']:.3f} ns).")
             return  # do not proceed to simulation if timing is violated
 
-        if not is_path3:
-            # Path 2: synthesis metrics are the final result
+        if not run_path3:
+            # Path 2 only: synthesis metrics are the final result
             _set_status(job_id, "success", metrics=metrics)
             logger.info(f"[Job {job_id}] Path 2 success.")
             return
 
-        # ── Path 3: Gate-Level Simulation ────────────────────────────────────
-        logger.info(f"[Job {job_id}] Starting gate-level simulation (VCS).")
+        # ── Path 3: Gate-Level Simulation (LFSR testbench, no hex transfer) ─────
+        # The Makefile selects the correct TB based on TOP_MODULE:
+        #   top_module=core    → tb_core_timing.sv  (full wrapper, off-chip FIFO protocol)
+        #   top_module=hd_top  → tb_hd_top_timing.sv (HD core only, direct interface)
+        logger.info(
+            f"[Job {job_id}] Starting gate-level simulation (VCS, top_module={top_module})."
+        )
         sim_result = subprocess.run(
-            ["make", "sim"],
+            ["make", "sim",
+             "SYNTH_MODE=" + synth_mode,
+             "TOP_MODULE=" + top_module],
             cwd=str(MAKEFILE_DIR),
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=SYNTH_TIMEOUT_SECONDS,
         )
         if sim_result.returncode != 0:
+            err_out = (sim_result.stderr or sim_result.stdout or "")[-2000:]
             raise RuntimeError(
-                f"make sim failed (exit {sim_result.returncode}):\n"
-                f"{sim_result.stderr[-2000:]}"
+                "make sim failed (exit %s):\n%s" % (sim_result.returncode, err_out)
             )
         logger.info(f"[Job {job_id}] VCS simulation complete.")
 
-        # Step 5: Run PrimeTime PX for dynamic power
+        # Step 5: Run PrimeTime PX for cycle-accurate dynamic power
         logger.info(f"[Job {job_id}] Starting PtPX power analysis.")
         power_result = subprocess.run(
-            ["make", "power"],
+            ["make", "power",
+             "TOP_MODULE=" + top_module],
             cwd=str(MAKEFILE_DIR),
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=SYNTH_TIMEOUT_SECONDS,
         )
         if power_result.returncode != 0:
+            err_out = (power_result.stderr or power_result.stdout or "")[-2000:]
             raise RuntimeError(
-                f"make power failed (exit {power_result.returncode}):\n"
-                f"{power_result.stderr[-2000:]}"
+                "make power failed (exit %s):\n%s" % (power_result.returncode, err_out)
             )
         logger.info(f"[Job {job_id}] PtPX power analysis complete.")
 
@@ -194,14 +183,14 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], hex_data: Optional[Dict[
         vcs_metrics = parse_vcs_reports(str(REPORTS_DIR))
         logger.info(f"[Job {job_id}] Parsed VCS/PtPX metrics: {vcs_metrics}")
 
-        # Merge: Path 3 upgrades power and adds cycle count; keeps area from DC
+        # Merge: Path 3 upgrades power + adds cycle count; keeps DC area (unchanged by sim)
         combined_metrics = {**metrics, **vcs_metrics}
         _set_status(job_id, "success", metrics=combined_metrics)
         logger.info(f"[Job {job_id}] Path 3 success.")
 
     except subprocess.TimeoutExpired:
         logger.error(f"[Job {job_id}] Timed out after {SYNTH_TIMEOUT_SECONDS}s.")
-        _set_status(job_id, "timeout", reason=f"Exceeded {SYNTH_TIMEOUT_SECONDS}s hard limit.")
+        _set_status(job_id, "timeout", reason="Exceeded %ds hard limit." % SYNTH_TIMEOUT_SECONDS)
     except Exception as exc:
         logger.error(f"[Job {job_id}] Error: {exc}")
         _set_status(job_id, "error", reason=str(exc))
@@ -227,9 +216,9 @@ def _worker_loop() -> None:
     """Single worker thread: pops jobs from queue and runs synthesis serially."""
     logger.info("Worker thread started — waiting for tasks.")
     while True:
-        job_id, params, hex_data = task_queue.get()
+        job_id, params, run_path3 = task_queue.get()
         try:
-            _run_synthesis(job_id, params, hex_data=hex_data)
+            _run_synthesis(job_id, params, run_path3=run_path3)
         finally:
             task_queue.task_done()
 
@@ -239,23 +228,33 @@ def _worker_loop() -> None:
 def _handle_submit(payload: Dict[str, Any]) -> Dict[str, Any]:
     job_id: int = payload.get("job_id", int(uuid.uuid4().int % 1_000_000))
     params: Dict[str, Any] = payload["params"]
-    hex_data: Optional[Dict[str, str]] = payload.get("hex_data")  # None for Path 2
+    # Path 3 is now triggered by a boolean flag, not by presence of hex_data.
+    # The testbench uses LFSR stimuli, so no hex transfer is required.
+    run_path3: bool = bool(payload.get("run_path3", False))
 
+    TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "timing_violated"})
     with registry_lock:
-        if job_id in job_registry:
+        existing = job_registry.get(job_id)
+        if existing is not None and existing["status"] not in TERMINAL_STATUSES:
             return {"job_id": job_id, "status": "error", "reason": "duplicate job_id"}
         job_registry[job_id] = {
             "status": "queued",
             "submitted_at": time.time(),
             "updated_at": time.time(),
-            "path3": hex_data is not None,
+            "path3": run_path3,
+            "top_module": str(params.get("top_module", "core")),
+            "synth_mode": str(params.get("synth_mode", "slow")),
         }
 
-    task_queue.put((job_id, params, hex_data))
+    task_queue.put((job_id, params, run_path3))
     logger.info(
-        f"[Job {job_id}] Accepted and queued "
-        f"({'Path 3 w/ hex_data' if hex_data else 'Path 2 synth only'}, "
-        f"queue depth: {task_queue.qsize()})."
+        "[Job %d] Accepted and queued (%s, synth_mode=%s, top_module=%s, queue depth: %d)." % (
+            job_id,
+            "Path 3 (VCS+PtPX)" if run_path3 else "Path 2 (synth only)",
+            params.get("synth_mode", "slow"),
+            params.get("top_module", "core"),
+            task_queue.qsize(),
+        )
     )
     return {"job_id": job_id, "status": "accepted"}
 

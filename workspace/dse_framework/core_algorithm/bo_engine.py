@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -37,6 +38,17 @@ from tqdm import tqdm
 from .normalizer import DynamicNormalizer
 
 logger = logging.getLogger(__name__)
+
+# Logger for sim/Evaluator — set to WARNING to suppress "image size", "num_classes", etc.
+_sim_logger = logging.getLogger("dse_framework.sim")
+_sim_logger.setLevel(logging.WARNING)
+
+
+def _format_trial_params(param: Dict[str, Any], params_prop: List[Dict[str, Any]]) -> str:
+    """Format trial params: show only choice (tunable) params in compact form."""
+    choice_names = {p["name"] for p in params_prop if p.get("type") == "choice"}
+    parts = [f"{k}={v}" for k, v in sorted(param.items()) if k in choice_names]
+    return ", ".join(parts) if parts else str(param)
 
 # ── Metric name mapping ───────────────────────────────────────────────────────
 # The Ax experiment uses these normalised metric names.
@@ -71,7 +83,8 @@ def _build_ax_client(
         model_kwargs = {"torch_device": "cpu"}
 
     cli = AxClient(
-        GenerationStrategy(
+        verbose_logging=False,
+        generation_strategy=GenerationStrategy(
             [
                 GenerationStep(_Models.SOBOL, num_trials=num_sobol_trials),
                 GenerationStep(
@@ -83,17 +96,24 @@ def _build_ax_client(
         )
     )
 
-    # All objectives with their Ax ObjectiveProperties
-    # Accuracy: maximise; others: minimise. Thresholds act as reference points.
-    cli.create_experiment(
-        parameters=params_prop,
-        objectives={
-            AX_ACCURACY: ObjectiveProperties(minimize=False, threshold=0.0),
-            AX_ENERGY:   ObjectiveProperties(minimize=True,  threshold=1.0),
-            AX_TIMING:   ObjectiveProperties(minimize=True,  threshold=1.0),
-            AX_AREA:     ObjectiveProperties(minimize=True,  threshold=1.0),
-        },
-    )
+    # Suppress Ax ChoiceParameter warnings: explicitly set is_ordered
+    # (sort_values is not accepted by parameter_from_json; filter the warning instead)
+    for p in params_prop:
+        if p.get("type") == "choice":
+            p.setdefault("is_ordered", p.get("value_type") == "int")
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*sort_values.*", module="ax.core.parameter")
+        # All objectives with their Ax ObjectiveProperties
+        cli.create_experiment(
+            parameters=params_prop,
+            objectives={
+                AX_ACCURACY: ObjectiveProperties(minimize=False, threshold=0.0),
+                AX_ENERGY:   ObjectiveProperties(minimize=True,  threshold=1.0),
+                AX_TIMING:   ObjectiveProperties(minimize=True,  threshold=1.0),
+                AX_AREA:     ObjectiveProperties(minimize=True,  threshold=1.0),
+            },
+        )
     return cli
 
 
@@ -125,6 +145,8 @@ def run_bo(
     hardware_args: Dict[str, Any],
     cwd: str,
     use_path2: bool = False,
+    use_path3: bool = False,
+    top_module: str = "core",
     eda_host: str = "EDA_SERVER_IP",
     eda_port: int = 5000,
 ) -> Dict[str, List]:
@@ -138,6 +160,11 @@ def run_bo(
         hardware_args:  Hardware flags dict (cnn, noise, temperature, etc.).
         cwd:            HDnn-PIM-Opt working directory (for Evaluator).
         use_path2:      If True, runs Path 2 EDA synthesis for configs passing Gate 1.
+        use_path3:      If True, runs Path 3 gate-level simulation (VCS + PtPX) after
+                        Path 2 succeeds. No hex data transfer required — the testbench
+                        uses LFSR-generated patterns. Requires use_path2=True.
+        top_module:     Synthesis and simulation scope: 'core' (full wrapper) or
+                        'hd_top' (HD core only). Controls TCL elaboration and VCS TB.
         eda_host:       EDA Server IP/hostname (used only when use_path2=True).
         eda_port:       EDA Server port.
 
@@ -147,7 +174,7 @@ def run_bo(
     """
     from sim.flow.utils import process_params_prop, set_seed
     from dse_framework.evaluators.path1_software import evaluate_path1
-    from dse_framework.evaluators.path2_hardware import evaluate_path2
+    from dse_framework.evaluators.path2_hardware import evaluate_path2, evaluate_path3
 
     set_seed(args["seed"])
 
@@ -191,12 +218,14 @@ def run_bo(
         gen_run = model.gen(1)
         param = gen_run.arms[0].parameters
         _, trial_idx = cli.attach_trial(param)
-        logger.info(f"[Iter {iteration}] Trial {trial_idx}: {param}")
+        logger.info(f"[Trial {trial_idx}] {_format_trial_params(param, params_prop)}")
 
         # ── Path 1: Software Simulation ──────────────────────────────────────
         try:
             p1_result = evaluate_path1(
-                param, data_args, training_args, hardware_args, cwd, logger
+                param, data_args, training_args, hardware_args, cwd,
+                logger_override=logger,
+                evaluator_logger=_sim_logger,
             )
         except Exception as exc:
             logger.error(f"[Trial {trial_idx}] Path 1 failed: {exc}")
@@ -219,6 +248,8 @@ def run_bo(
             p2_result = evaluate_path2(
                 param, trial_idx, accuracy,
                 data_args, training_args, hardware_args, cwd,
+                hd_model=p1_result.get("hd_model"),
+                top_module=top_module,
                 eda_host=eda_host, eda_port=eda_port,
             )
             if p2_result["status"] != "success":
@@ -226,6 +257,30 @@ def run_bo(
                 cli.log_trial_failure(trial_idx)
                 continue
             raw_metrics = p2_result["metrics"]
+
+            # ── Path 3 (optional): Gate-Level Simulation ─────────────────────
+            # Gate 2 has already passed (Path 2 succeeded). Run VCS + PtPX to
+            # get cycle-accurate timing and precise dynamic power.
+            if use_path3:
+                p3_result = evaluate_path3(
+                    param, trial_idx, accuracy,
+                    path2_asic_metrics=p2_result.get("_asic_metrics", {}),
+                    data_args=data_args,
+                    training_args=training_args,
+                    hardware_args=hardware_args,
+                    cwd=cwd,
+                    hd_model=p1_result.get("hd_model"),
+                    top_module=top_module,
+                    eda_host=eda_host,
+                    eda_port=eda_port,
+                )
+                if p3_result.get("status") == "success":
+                    raw_metrics = p3_result["metrics"]
+                    logger.info(f"[Trial {trial_idx}] Path 3 success — upgraded to VCS+PtPX metrics.")
+                else:
+                    logger.warning(
+                        f"[Trial {trial_idx}] Path 3 failed — keeping Path 2 metrics as fallback."
+                    )
         else:
             raw_metrics = p1_result  # Use Path 1 metrics directly
 
@@ -259,6 +314,5 @@ def run_bo(
             f"timing={raw_metrics['timing_us']:.2f}us, "
             f"area={raw_metrics['area_mm2']:.4f}mm^2, HV={hv:.4f}"
         )
-        logger.info(f"[Iter {iteration}] Normalisation bases: {normalizer.current_bases}")
 
     return history

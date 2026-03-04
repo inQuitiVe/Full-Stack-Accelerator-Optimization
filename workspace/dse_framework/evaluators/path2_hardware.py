@@ -36,6 +36,39 @@ if _HDNN_ROOT not in sys.path:
 
 from dse_framework.network.eda_client import evaluate_remote, EDAClientError
 
+# Valid synth_profile values for EDA Server (must match json_to_svh.py)
+_VALID_SYNTH_PROFILES = frozenset({"balanced_default", "timing_aggressive", "power_aggressive", "exact_map"})
+
+
+_VALID_TOP_MODULES = frozenset({"core", "hd_top"})
+
+
+def _sanitize_params_for_eda(
+    params: Dict[str, Any],
+    top_module: str = "core",
+) -> Dict[str, Any]:
+    """
+    Fix known BO param mapping bugs before sending to EDA Server.
+    E.g. synth_profile sometimes receives inner_dim value ('1024') due to process_params_prop.
+    Ensures synth_mode is "fast" or "slow" (default "slow") for server-side dual-track synthesis.
+    Also injects top_module ("core" or "hd_top") into the params for TCL elaboration and TB routing.
+    """
+    out = dict(params)
+    profile = out.get("synth_profile")
+    if profile is not None and str(profile).strip() not in _VALID_SYNTH_PROFILES:
+        logger.warning(
+            "synth_profile=%r invalid (possible param mapping bug). Using balanced_default.",
+            profile,
+        )
+        out["synth_profile"] = "balanced_default"
+    mode = str(out.get("synth_mode", "slow")).strip().lower()
+    out["synth_mode"] = mode if mode in ("fast", "slow") else "slow"
+
+    # top_module selects TCL elaboration root and Path 3 testbench
+    tm = str(top_module).strip().lower()
+    out["top_module"] = tm if tm in _VALID_TOP_MODULES else "core"
+    return out
+
 
 # ── RRAM-only Cimloop evaluation ──────────────────────────────────────────────
 
@@ -159,6 +192,7 @@ def evaluate_path2(
     hardware_args: Dict[str, Any],
     cwd: str,
     hd_model=None,
+    top_module: str = "core",
     eda_host: str = "EDA_SERVER_IP",
     eda_port: int = 5000,
 ) -> Dict[str, Any]:
@@ -174,18 +208,26 @@ def evaluate_path2(
         hardware_args:  Hardware configuration flags.
         cwd:            HDnn-PIM-Opt working directory.
         hd_model:       Cached HD model from Path 1 (required for RRAM Cimloop).
+        top_module:     Synthesis scope: 'core' (full wrapper) or 'hd_top' (HD core only).
         eda_host:       EDA Server hostname or IP.
         eda_port:       EDA Server TCP port.
 
     Returns:
-        {"status": "success", "metrics": {accuracy, energy_uj, timing_us, area_mm2}}
+        {"status": "success", "metrics": {...}, "_asic_metrics": {...}}
         OR
         {"status": "failed"}    — caller should call ax_client.mark_trial_failed()
+
+    Note: "_asic_metrics" is a private field forwarded to evaluate_path3 so it can
+    upgrade area (which doesn't change between Path 2 and Path 3).
     """
-    # Step 1: Submit to EDA Server and wait for synthesis result
+    # Step 1: Merge config synth_mode (optional), sanitize params, then submit to EDA Server
+    params_with_hw = dict(params)
+    if "synth_mode" not in params_with_hw and hardware_args:
+        params_with_hw.setdefault("synth_mode", hardware_args.get("synth_mode", "slow"))
+    params_for_eda = _sanitize_params_for_eda(params_with_hw, top_module=top_module)
     try:
         eda_result = evaluate_remote(
-            params, job_id, host=eda_host, port=eda_port
+            params_for_eda, job_id, host=eda_host, port=eda_port
         )
     except EDAClientError as exc:
         logger.error(f"[Job {job_id}] EDA Client network error: {exc}")
@@ -223,6 +265,8 @@ def evaluate_path2(
             "timing_us": combined["timing_us"],
             "area_mm2": combined["area_mm2"],
         },
+        # Forward raw ASIC metrics to Path 3 for stitching (area doesn't change)
+        "_asic_metrics": asic_metrics,
     }
 
 
@@ -236,22 +280,51 @@ def evaluate_path3(
     hardware_args: Dict[str, Any],
     cwd: str,
     hd_model=None,
+    top_module: str = "core",
     eda_host: str = "EDA_SERVER_IP",
     eda_port: int = 5000,
 ) -> Dict[str, Any]:
     """
-    Path 3 evaluation: query VCS cycle count from EDA Server, then stitch with
-    Path 2 ASIC power data (already obtained) and Cimloop RRAM data.
+    Path 3 evaluation: gate-level simulation (VCS) + PtPX power analysis via EDA Server.
 
-    `path2_asic_metrics` must be the `metrics` dict returned by the EDA Server
-    during Path 2 (contains area_um2, clock_period_ns, dynamic_power_mw,
-    leakage_power_mw).
+    No hex data transfer is required. The server-side testbench (tb_core_timing.sv or
+    tb_hd_top_timing.sv) generates its own LFSR-based stimuli, ensuring cycle-accurate
+    timing and realistic toggle-activity-based power estimates without the I/O overhead
+    of transferring Megabytes of PyTorch inference data.
+
+    Args:
+        params:              BO parameter dict.
+        job_id:              Ax trial index (Path 3 jobs use job_id + 1_000_000).
+        accuracy:            Accuracy value carried from Path 1.
+        path2_asic_metrics:  Raw ASIC metrics from EDA Server during Path 2
+                             (contains area_um2, clock_period_ns). Area is reused;
+                             power is upgraded from PtPX.
+        data_args:           Dataset configuration (for Cimloop RRAM re-evaluation).
+        training_args:       Training configuration.
+        hardware_args:       Hardware configuration flags.
+        cwd:                 HDnn-PIM-Opt working directory.
+        hd_model:            Cached HD model from Path 1 (required for RRAM Cimloop).
+        top_module:          Simulation scope: 'core' → tb_core_timing.sv,
+                             'hd_top' → tb_hd_top_timing.sv.
+        eda_host:            EDA Server hostname or IP.
+        eda_port:            EDA Server TCP port.
+
+    Returns:
+        {"status": "success", "metrics": {accuracy, energy_uj, timing_us, area_mm2}}
+        OR
+        {"status": "failed"}
     """
     path3_job_id = job_id + 1_000_000  # Distinguish Path 3 jobs from Path 2
 
+    # Build params for server: include run_path3=True flag and top_module scope.
+    # No hex_data is sent — the testbench uses LFSR stimuli.
+    params_for_eda = _sanitize_params_for_eda(params, top_module=top_module)
+
     try:
         vcs_result = evaluate_remote(
-            params, path3_job_id, host=eda_host, port=eda_port
+            params_for_eda, path3_job_id,
+            host=eda_host, port=eda_port,
+            run_path3=True,     # Signal server to run VCS + PtPX after synthesis
         )
     except EDAClientError as exc:
         logger.error(f"[Job {job_id}] Path 3 EDA Client error: {exc}")
@@ -267,7 +340,13 @@ def evaluate_path3(
     path3_dynamic_power_mw: float = vcs_result["metrics"]["dynamic_power_mw"]
     path3_leakage_power_mw: float = vcs_result["metrics"].get("leakage_power_mw", 0.0)
 
-    # Use cycle-accurate power from PtPX; keep area from Path 2 (unchanged)
+    logger.info(
+        f"[Job {job_id}] Path 3 VCS metrics: cycles={execution_cycles}, "
+        f"dyn_power={path3_dynamic_power_mw:.4f} mW, "
+        f"leak_power={path3_leakage_power_mw:.4f} mW"
+    )
+
+    # Upgrade power from PtPX; keep area from Path 2 (unchanged by simulation)
     upgraded_asic = {
         **path2_asic_metrics,
         "dynamic_power_mw": path3_dynamic_power_mw,

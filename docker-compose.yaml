@@ -39,7 +39,8 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     ports:
-      - "8888:8888"
+      # 9000/8888 落在 Windows 排除範圍，改用 8080
+      - "8080:8888"
     volumes:
       - ./workspace:/home/workspace
     environment:

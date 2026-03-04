@@ -1,9 +1,10 @@
 # Full-Stack Accelerator Optimization Framework
 
 **Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture  
-**Status:** Phase 2 (Baseline Exploration Flow) Implemented | Phase 3 (Verification & EDA DSE) Planning
+**Status:** Phase 2 (Baseline Exploration) + Path 3 (LFSR Gate-Level Verification) Implemented
 
-All architecture and flow diagrams (Mermaid) are in **[README_IMAGES.md](README_IMAGES.md)**.
+All architecture and flow diagrams (Mermaid) are in **[README_IMAGES.md](README_IMAGES.md)**.  
+Modification summaries and changelogs: **[docs/](docs/)** (e.g. [2026-02-27 修改與優化總結](docs/2026-02-27-修改與優化總結.md)).
 
 ---
 
@@ -33,35 +34,33 @@ To overcome the evaluation bottleneck, the framework employs a three-tiered pipe
 **Diagram:** [Multi-Fidelity Evaluation Pipeline](README_IMAGES.md#2-multi-fidelity-evaluation-pipeline) — see [README_IMAGES.md](README_IMAGES.md).
 
 ### 3.1 Path 1: Fast Software Simulation
-* **Engine:** `path1_software.py` (Calls Cimloop + Timeloop)
-* **Gate 1:** If PyTorch accuracy is below the defined constraint, the trial is marked as failed without penalty injection.
-* **Data Prep (Phase 3):** Dumps model weights, inputs, and labels to HEX files for downstream verification.
+* **Engine:** `path1_software.py` (PyTorch HD model + Cimloop RRAM estimator)
+* **Gate 1:** If PyTorch accuracy is below the defined constraint, the trial is marked as failed (via Ax) and **no hardware work is launched**.
 
 ### 3.2 Path 2: Hardware Synthesis (Client-Side Stitching)
 * **Engine:** `path2_hardware.py`
 * **Stitching Logic:** Since the RRAM portion lacks RTL, Path 2 stitches ASIC data (from the EDA server) with RRAM data (re-run locally via Cimloop).
   * `Total Timing = ASIC Delay (EDA) + RRAM Delay (Cimloop)`
   * `Total Energy = ASIC Power (EDA) * Total Timing + RRAM Energy (Cimloop)`
-* **Gate 2:** If the synthesized netlist violates timing constraints (`slack < 0`), the trial fails.
+* **Gate 2:** If the synthesized netlist violates timing constraints (`slack < 0`), the trial fails. Path 3 is only considered for designs that pass Gate 2.
 
-### 3.3 Path 3: Gate-Level Simulation (Verification)
-* **Engine:** `path2_hardware.py` (with Path 3 flag) calling EDA Server (VCS + PtPX).
-* **Cycle-accurate data:** VCS provides actual execution cycle count, replacing Timeloop's estimate.
-* **Final Energy:** `(asic_dynamic_power_mW * total_time_us) + rram_energy_uJ`
-
-#### Phase 3 Testbench Architecture & Data Flow
-Because the EDA server is a black box, the client must generate the test data dynamically and send it to the server to be read by the Testbench (`tb_top.sv`).
-
-**Diagram:** [Phase 3 Testbench Architecture and Data Flow](README_IMAGES.md#3-phase-3-testbench-architecture-and-data-flow) — see [README_IMAGES.md](README_IMAGES.md).
-
-**Testbench Parameter Mapping:**
-| Original Parameter (YAML) | Testbench Macro / Parameter | Purpose in TB |
-| :--- | :--- | :--- |
-| `frequency` | `TB_CLK_PERIOD_NS` | Clock generation: `# (TB_CLK_PERIOD_NS / 2.0) clk = ~clk;` |
-| `num_tests` | `TB_NUM_VECTORS` | Loop bounds for reading test vectors |
-| `dataset` | `TB_INPUT_FILE` | Hex file path for input features |
-| (New) | `TB_GOLDEN_FILE` | Hex file path for golden labels (to verify HW accuracy) |
-| (New) | `TB_WEIGHT_FILE` | Hex file path for pre-trained HDnn weights |
+### 3.3 Path 3: Gate-Level Simulation & Power Verification (LFSR-Based)
+* **Engine:** `evaluate_path3()` in `path2_hardware.py`, which reuses Path 2 ASIC metrics and calls the EDA Server with `run_path3=True`.
+* **Triggering:** The client does **not** send HEX data. Instead, it sets `run_path3=True` and passes a `top_module` flag (`core` or `hd_top`) inside the JSON payload. The server checks `run_path3` and, if timing is met, runs:
+  - `make sim` — VCS gate-level simulation with SAIF dump.
+  - `make power` — PrimeTime PX dynamic power analysis using the SAIF activity.
+* **LFSR Testbenches (on the EDA server):**
+  - `fsl-hd/verilog/tb/tb_core_timing.sv` — exercises the `core` top-level, including chip interface and FIFOs.
+  - `fsl-hd/verilog/tb/tb_hd_top_timing.sv` — focuses on the `hd_top` core only.
+  Both testbenches generate their own pseudo-random stimuli using LFSRs and print a line of the form  
+  `COMPUTE CYCLES      : <num>  (ENC_PRELOAD → oFIFO result)`, from which the server parses the exact execution cycle count.
+* **Final Metrics Stitching:**
+  - ASIC timing is computed as `clock_period_ns * execution_cycles / 1e3` (us) using **Path 2** clock period and **Path 3** cycle count.
+  - ASIC energy is obtained from PtPX dynamic + leakage power and multiplied by the total timing.
+  - RRAM timing and energy continue to come exclusively from Cimloop (no RTL), and are added on top of the ASIC portion.
+* **Testbench Macro Mapping (summary):**
+  - `frequency` → `TB_CLK_PERIOD_NS` (full clock period for TB clock generator).
+  - No testbench file paths are needed; all stimuli are generated on-chip by the testbenches.
 
 ---
 
@@ -89,7 +88,11 @@ Tunable parameters are centrally defined in `workspace/conf/params_prop/cimloop.
 
 ### 5.2 Synthesis Flags DSE (Config & TCL Mapping)
 
-By exposing synthesis flags to the BO engine, we can explore the Pareto front between RTL architecture and EDA optimization strategies. The parameter `synth_profile` directs the TCL generation scripts.
+By exposing synthesis flags to the BO engine, we can explore the Pareto front between RTL architecture and EDA optimization strategies. These flags are defined in `workspace/conf/params_prop/cimloop.yaml` and injected into `synth_dse.tcl` by `eda_server_scripts/json_to_svh.py`.
+
+#### 5.2.1 High-Level Synthesis Profiles (`synth_profile`)
+
+The `synth_profile` parameter selects a multi-line TCL strategy block that is injected at `SYNTH_PROFILE_PLACEHOLDER` in the DC template:
 
 | `synth_profile` (YAML) | DC TCL Commands Generated | Strategy Goal |
 | :--- | :--- | :--- |
@@ -98,7 +101,20 @@ By exposing synthesis flags to the BO engine, we can explore the Pareto front be
 | `balanced_default` | `insert_clock_gating`<br/>`compile_ultra` (default) | Standard compilation. |
 | `exact_map` | `compile_ultra -exact_map -no_autoungroup` | Preserves hierarchies for precise logic mapping. |
 
-**Diagram:** [Synthesis Profile to TCL Injection (Config Flow)](README_IMAGES.md#5-synthesis-profile-to-tcl-injection-config-flow) — see [README_IMAGES.md](README_IMAGES.md).
+Invalid values (e.g., a mis-mapped integer like `"1024"`) are automatically mapped back to `balanced_default` with a warning on the server, preventing BO bugs from crashing the flow.
+
+#### 5.2.2 Low-Level Effort Flags (`syn_map_effort`, `syn_opt_effort`, `enable_retime`, `enable_gate_clock`)
+
+In addition to `synth_profile`, several scalar flags are tuned by BO and translated into DC `set_app_var` commands or compile options:
+
+| YAML Parameter | Allowed Values | DC Effect |
+| :--- | :--- | :--- |
+| `syn_map_effort` | `low`, `medium`, `high` | `set_app_var compile_map_effort <value>` |
+| `syn_opt_effort` | `low`, `medium`, `high` | `set_app_var compile_opt_effort <value>` |
+| `enable_gate_clock` | `"false"`, `"true"` | When `"true"`, emits `set_clock_gating_style -sequential_cell latch` + `insert_clock_gating`. |
+| `enable_retime` | `"false"`, `"true"` | When `"true"`, injects `-retime` into the first `compile_ultra` command that does not already specify it. |
+
+These flags are fully implemented in `_build_synth_dse_options_block()` and `_apply_retime_if_requested()` inside `json_to_svh.py`.
 
 ### 5.3 Software-to-RTL Mapping Table
 Implemented in `eda_server_scripts/json_to_svh.py`.
@@ -108,9 +124,10 @@ Implemented in `eda_server_scripts/json_to_svh.py`.
 | `reram_size` | `` `RRAM_ROW_ADDR_WIDTH `` | `ceil(log2(reram_size))` |
 | `hd_dim` | `` `HV_LENGTH `` | Direct |
 | `inner_dim` | `` `INNER_DIM `` | Direct |
-| `cnn_x_dim_1` × `cnn_y_dim_1` | `` `INPUTS_NUM `` (Layer 1) | Product |
+| `cnn_x_dim_1` × `cnn_y_dim_1` | `` `CNN1_INPUTS_NUM `` | Product |
+| `cnn_x_dim_2` × `cnn_y_dim_2` | `` `CNN2_INPUTS_NUM `` | Product |
 | `encoder_x_dim` × `encoder_y_dim` | `` `ENC_INPUTS_NUM `` | Product |
-| `hd_dim` / (`encoder_x_dim` × `encoder_y_dim`) | `` `HV_SEG_WIDTH `` | Integer Division |
+| `hd_dim` / (`encoder_x_dim` × `encoder_y_dim`) | `` `HV_SEG_WIDTH `` | Integer division, with additional structural constraints (must be ≥ `HAMMING_DIST_WIDTH + CLASS_LABEL_WIDTH`, divide `WEIGHT_BUS_WIDTH`, and satisfy `TRAINING_DATA_NUM * HV_SEG_WIDTH ≤ SP_TRAINING_WIDTH`). |
 | `frequency` | DC TCL `create_clock -period` | `1e9 / frequency` (ns) |
 
 ---
@@ -130,10 +147,10 @@ Full-Stack-Accelerator-Optimization/
 │   ├── HDnn-PIM-Opt/                  # Pure software evaluator (Path 1 / Cimloop)
 │   └── conf/                          # Hydra configurations (YAML)
 │
-└── eda_server_scripts/                # Deploy on remote EDA Server
-    ├── eda_server.py                  # Socket Server (Queue + Timeout)
-    ├── json_to_svh.py                 # Macro & TCL generation
-    └── parsers/                       # DC and VCS regex parsers
+└── eda_server_scripts/                # Scripts deployed onto the remote EDA server (often as full-stack-opt/ alongside fsl-hd/)
+    ├── eda_server.py                  # Socket Server (Queue + Timeout, run_path3 flag, SYNTH_MODE/TOP_MODULE forwarding)
+    ├── json_to_svh.py                 # Macro & TCL generation (clock, TOP_MODULE, synthesis flags, TB macros)
+    └── parsers/                       # DC and VCS/PTPX regex parsers (including COMPUTE CYCLES extraction)
 ```
 
 ---
@@ -148,10 +165,10 @@ Full-Stack-Accelerator-Optimization/
 - [x] Client-side data stitching (`path2_hardware.py`).
 - [x] Ax/BoTorch Engine refactoring (`bo_engine.py` + dynamic normalization).
 
-### Phase 3 & 4: Verification & Full BO Integration [⏳ PENDING]
-- [ ] Implement `synth_profile` logic in `json_to_svh.py` to generate TCL commands.
-- [ ] Establish VCS → PtPX SAIF handoff pipeline (`parse_vcs.py`).
-- [ ] Create parameterized `tb_top.sv` using macros (`TB_CLK_PERIOD_NS`, etc.).
-- [ ] Implement hex data dumping in Path 1 and transmission in JSON payload.
+### Phase 3 & 4: Verification & Full BO Integration
+- [x] Implement `synth_profile` logic in `json_to_svh.py` to generate TCL strategy blocks (with defensive fallback to `balanced_default`).
+- [x] Establish VCS → PtPX SAIF handoff pipeline (`Makefile sim/power` + `parse_vcs.py` with `COMPUTE CYCLES` regex).
+- [x] Create LFSR-based timing testbenches (`tb_core_timing.sv` / `tb_hd_top_timing.sv`) driven by `TB_CLK_PERIOD_NS` and selected via `TOP_MODULE`.
+- [x] Replace hex-data-based Path 3 with a `run_path3` flag and on-server LFSR stimulus generation (no PyTorch HEX transfer).
 - [ ] Define hard boundary constraints for all BO parameters (min/max bounds).
 - [ ] **Cross-Path Calibration:** Use Path 2/3 physical data to calibrate Path 1 analytical models.

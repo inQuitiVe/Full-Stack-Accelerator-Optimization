@@ -41,6 +41,12 @@ hardware:
   temperature: 300
   power: energy
   cnn: true
+  # synth_mode: slow   # EDA synthesis mode: slow (full PatterNet) | fast (PatterNet blackbox)
+  # top_module: core   # Synthesis/simulation scope: core (full wrapper) | hd_top (HD core only)
+  # Note: synth_mode and top_module are independent axes:
+  #   synth_mode=fast  → PatterNet omitted from RTL analysis (blackbox) regardless of top_module
+  #   top_module=core  → DC elaborates 'core'; Path 3 uses tb_core_timing.sv
+  #   top_module=hd_top → DC elaborates 'hd_top'; Path 3 uses tb_hd_top_timing.sv
 
 metrics:
   - accuracy
@@ -131,3 +137,5 @@ plot_param:
 
 data_collect:
   output_file: hdnn-pim.csv # absolute path if from checkpoint
+
+
