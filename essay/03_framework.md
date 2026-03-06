@@ -48,9 +48,10 @@
 
 我們將以下參數交由 BO 動態決策：
 1. **`synth_profile` (綜合輪廓)**：提供高層級的策略預設。
-   - `balanced_default`：標準的 `compile_ultra` 與時脈閘控 (Clock gating)。
-   - `timing_aggressive`：開啟重定時 (`-retime`) 與高時序優化腳本，犧牲面積換取極限速度。
-   - `power_aggressive`：啟用面積導向腳本 (`-area_high_effort_script`) 追求極致微縮。
+   - `balanced_default`：標準的 `compile_ultra`、時脈閘控與 `set_max_area 0`。
+   - `timing_aggressive`：`set_max_area 0` + 重定時 (`-retime`) 與高時序優化腳本，犧牲面積換取極限速度。
+   - `power_aggressive`：時脈閘控 + 漏電/動態優化 + `compile_ultra -gate_clock`，追求極致功耗優化。
+   - `area_aggressive`：`set_max_area 0 -ignore_tns` + 面積導向腳本，追求極致微縮（可能違反時序）。
    - `exact_map`：保留 RTL 階層，確保精準對應。
 2. **`syn_map_effort` 與 `syn_opt_effort`**：控制對映 (Mapping) 與優化 (Optimization) 階段的努力度等級 (`low`/`medium`/`high`)。
 

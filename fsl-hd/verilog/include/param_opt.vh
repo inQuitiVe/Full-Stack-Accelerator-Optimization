@@ -6,8 +6,8 @@
 `include "config_macros.svh"
 
 // Base static parameters copied from param.vh, but with
-// RRAM_ROW_ADDR_WIDTH and HV_SEG_WIDTH removed so that the
-// values from config_macros.svh take effect.
+// RRAM_ROW_ADDR_WIDTH, HV_SEG_WIDTH, and WEIGHT_MEM_ADDR_WIDTH removed
+// so that the values from config_macros.svh take effect.
 
 `define USE_DW                  1 // use Synopsys Designware, for simulation+synthesis
 // `define USE_CW                  1 // use Candence Chipware, for synthesis
@@ -80,7 +80,7 @@
 `define OUTPUTS_NUM             32
 `define ODATA_WIDTH             16
 
-`define WEIGHT_MEM_ADDR_WIDTH   5
+// WEIGHT_MEM_ADDR_WIDTH comes from config_macros.svh (derived from inner_dim)
 `define WEIGHT_MEM_DATA_WIDTH   32
 
 `define INPUT_MEM_ADDR_WIDTH    5

@@ -37,11 +37,15 @@
 // =============================================================================
 // `timescale 1ns/1ps
 `include "param_opt.vh"
+`include "tb_macros.svh"
 
 module tb_core_timing;
 
   // ── Clock / timing parameters ─────────────────────────────────────────────
-  localparam real CLK_PERIOD    = 4.0;     // core clk (250 MHz)
+  // Core clock period is driven by TB_CLK_PERIOD_NS (from json_to_svh.py),
+  // which is derived from the BO `frequency` parameter to stay consistent
+  // with the DC create_clock constraint.
+  localparam real CLK_PERIOD    = `TB_CLK_PERIOD_NS;
   localparam real CLK_IO_PERIOD = 20.0;    // host IO clk (50 MHz)
   localparam real CLK_PHASE_DLY = 2.0;
   localparam int  MAX_CYCLES    = 10_000_000;
@@ -54,7 +58,7 @@ module tb_core_timing;
   localparam int N_WEIGHT_WORDS = N_WEIGHT_ROWS * WORDS_PER_ROW;    // 128
   localparam int N_FEAT_WORDS   = N_ENC_GROUPS;                      // 16
 
-  localparam int NUM_CLASSES    = 8;                      // number of classes used in this test
+  localparam int NUM_CLASSES    = 10;                     // MNIST/CIFAR-10 default
   localparam int N_CLASS_WORDS  = NUM_CLASSES * N_SEG;   // 8×32=256
 
   // ── inp_buf / data_buf address map ─────────────────────────────────────────
@@ -278,6 +282,25 @@ module tb_core_timing;
     end
   endtask
 
+  // ── Waveform Dump for PtPX Toggle-Based Power Analysis ────────────────────
+  // Compile with +define+DUMP_FSDB → FSDB  (preferred; requires VCS -kdb).
+  // Default (no define)            → VCD   (always supported by VCS).
+  // CWD during ./simv = fsl-hd/   → reports/ is a direct subdirectory.
+  //
+  // Only the DUT subtree (dut.*) is captured to keep file size manageable.
+  // Toggle activity is passed to PrimeTime PX via 'make power' for accurate
+  // dynamic power estimation; energy = dynamic_power × compute_cycles × clk.
+  initial begin
+`ifdef DUMP_FSDB
+    $fsdbDumpfile("reports/activity.fsdb");
+    $fsdbDumpvars(0, dut);   // depth=0 means all levels under dut
+    $fsdbDumpMDA();           // include multi-dimensional arrays / memories
+`else
+    $dumpfile("reports/activity.vcd");
+    $dumpvars(0, dut);
+`endif
+  end
+
   // ── Main scenario ──────────────────────────────────────────────────────────
   logic [63:0] data_seed;
 
@@ -301,6 +324,9 @@ module tb_core_timing;
     $display(" tb_core_timing : full evaluation latency measurement");
     $display("  HV_LENGTH      = %0d",  `HV_LENGTH);
     $display("  HV_SEG_WIDTH   = %0d",  `HV_SEG_WIDTH);
+    $display("  INNER_DIM      = %0d",  `INNER_DIM);
+    $display("  WEIGHT_MEM_W   = %0d",  `WEIGHT_MEM_ADDR_WIDTH);
+    $display("  N_WEIGHT_ROWS  = %0d",  N_WEIGHT_ROWS);
     $display("  ENC_INPUTS_NUM = %0d",  `ENC_INPUTS_NUM);
     $display("  INPUTS_NUM     = %0d",  `INPUTS_NUM);
     $display("  OUTPUTS_NUM    = %0d",  `OUTPUTS_NUM);
@@ -336,7 +362,7 @@ module tb_core_timing;
 
     // ── Phase 2: Encoding weights → inp_buf[WEIGHT_BASE..WEIGHT_BASE+127]
     //   16 STORE_BUF instructions, burst=8 each.
-    report_phase("Ph2: storing encoding weights (inp_buf[1..128]) ...");
+    report_phase($sformatf("Ph2: storing encoding weights (inp_buf[1..%0d]) ...", N_WEIGHT_WORDS));
     phase_start_cycle = cycle_count;
     store_to_inp_buf(WEIGHT_BASE, N_WEIGHT_WORDS, data_seed);
     // Conservative wait: each word needs ~2×clk_io pushes + SRAM write + CDC

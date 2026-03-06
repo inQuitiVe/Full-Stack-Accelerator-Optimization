@@ -36,10 +36,6 @@ if _HDNN_ROOT not in sys.path:
 
 from dse_framework.network.eda_client import evaluate_remote, EDAClientError
 
-# Valid synth_profile values for EDA Server (must match json_to_svh.py)
-_VALID_SYNTH_PROFILES = frozenset({"balanced_default", "timing_aggressive", "power_aggressive", "exact_map"})
-
-
 _VALID_TOP_MODULES = frozenset({"core", "hd_top"})
 
 
@@ -48,19 +44,12 @@ def _sanitize_params_for_eda(
     top_module: str = "core",
 ) -> Dict[str, Any]:
     """
-    Fix known BO param mapping bugs before sending to EDA Server.
-    E.g. synth_profile sometimes receives inner_dim value ('1024') due to process_params_prop.
+    Sanitize params before sending to EDA Server.
     Ensures synth_mode is "fast" or "slow" (default "slow") for server-side dual-track synthesis.
-    Also injects top_module ("core" or "hd_top") into the params for TCL elaboration and TB routing.
+    Injects top_module ("core" or "hd_top") for TCL elaboration and TB routing.
+    Synthesis strategy is built from granular flags in json_to_svh.py (no synth_profile).
     """
     out = dict(params)
-    profile = out.get("synth_profile")
-    if profile is not None and str(profile).strip() not in _VALID_SYNTH_PROFILES:
-        logger.warning(
-            "synth_profile=%r invalid (possible param mapping bug). Using balanced_default.",
-            profile,
-        )
-        out["synth_profile"] = "balanced_default"
     mode = str(out.get("synth_mode", "slow")).strip().lower()
     out["synth_mode"] = mode if mode in ("fast", "slow") else "slow"
 
@@ -370,5 +359,11 @@ def evaluate_path3(
             "energy_uj": combined["energy_uj"],
             "timing_us": combined["timing_us"],
             "area_mm2": combined["area_mm2"],
+        },
+        # Raw VCS metrics for logging / persistence (used by bo_engine history)
+        "_vcs_metrics": {
+            "execution_cycles": execution_cycles,
+            "dynamic_power_mw": path3_dynamic_power_mw,
+            "leakage_power_mw": path3_leakage_power_mw,
         },
     }

@@ -157,9 +157,10 @@ The BO search space now includes a dedicated EDA-synthesis subspace. These flags
 
 The `synth_profile` choice parameter selects a multi-line TCL block injected at `SYNTH_PROFILE_PLACEHOLDER`:
 
-- `balanced_default` — clock gating + `compile_ultra`.
-- `timing_aggressive` — `compile_ultra -retime -timing_high_effort_script` + `set_dp_smartgen_options -optimization_strategy timing`.
-- `power_aggressive` — `insert_clock_gating` + `compile_ultra -area_high_effort_script` + `set_dp_smartgen_options -optimization_strategy area`.
+- `balanced_default` — clock gating + `set_max_area 0` + `compile_ultra`.
+- `timing_aggressive` — `set_max_area 0` + `compile_ultra -retime -timing_high_effort_script` (no clock gating).
+- `power_aggressive` — clock gating + `set_leakage_optimization` + `set_dynamic_optimization` + `compile_ultra -gate_clock`.
+- `area_aggressive` — `set_max_area 0 -ignore_tns` + `compile_ultra -area_high_effort_script` (may violate timing).
 - `exact_map` — `compile_ultra -exact_map -no_autoungroup` to preserve hierarchy.
 
 If an invalid value is received (e.g. the `"1024"` bug caused by `process_params_prop`), the code logs a warning and falls back to `balanced_default` instead of raising an exception.

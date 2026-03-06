@@ -197,8 +197,14 @@ def run_bo(
     cli = _build_ax_client(params_prop, num_sobol, acqf_name)
 
     history: Dict[str, List] = {
+        # Final stitched objectives (used for Pareto / HV)
         "accuracy": [], "energy_uj": [], "timing_us": [],
         "area_mm2": [], "hv": [], "param": [],
+        # Path 2 raw ASIC metrics (EDA synthesis)
+        "p2_area_um2": [], "p2_timing_slack_ns": [],
+        "p2_clock_period_ns": [], "p2_dynamic_power_mw": [],
+        # Path 3 raw VCS / PtPX metrics
+        "p3_execution_cycles": [], "p3_dynamic_power_mw": [],
     }
 
     for iteration in tqdm(range(num_epochs), desc="BO Iterations"):
@@ -258,13 +264,20 @@ def run_bo(
                 continue
             raw_metrics = p2_result["metrics"]
 
+            # Store Path 2 raw ASIC metrics in history (always available after Gate 2)
+            _asic = p2_result.get("_asic_metrics", {})
+            history["p2_area_um2"].append(_asic.get("area_um2", None))
+            history["p2_timing_slack_ns"].append(_asic.get("timing_slack_ns", None))
+            history["p2_clock_period_ns"].append(_asic.get("clock_period_ns", None))
+            history["p2_dynamic_power_mw"].append(_asic.get("dynamic_power_mw", None))
+
             # ── Path 3 (optional): Gate-Level Simulation ─────────────────────
             # Gate 2 has already passed (Path 2 succeeded). Run VCS + PtPX to
             # get cycle-accurate timing and precise dynamic power.
             if use_path3:
                 p3_result = evaluate_path3(
                     param, trial_idx, accuracy,
-                    path2_asic_metrics=p2_result.get("_asic_metrics", {}),
+                    path2_asic_metrics=_asic,
                     data_args=data_args,
                     training_args=training_args,
                     hardware_args=hardware_args,
@@ -276,13 +289,25 @@ def run_bo(
                 )
                 if p3_result.get("status") == "success":
                     raw_metrics = p3_result["metrics"]
+                    _vcs = p3_result.get("_vcs_metrics", {})
+                    history["p3_execution_cycles"].append(_vcs.get("execution_cycles", None))
+                    history["p3_dynamic_power_mw"].append(_vcs.get("dynamic_power_mw", None))
                     logger.info(f"[Trial {trial_idx}] Path 3 success — upgraded to VCS+PtPX metrics.")
                 else:
+                    history["p3_execution_cycles"].append(None)
+                    history["p3_dynamic_power_mw"].append(None)
                     logger.warning(
                         f"[Trial {trial_idx}] Path 3 failed — keeping Path 2 metrics as fallback."
                     )
+            else:
+                history["p3_execution_cycles"].append(None)
+                history["p3_dynamic_power_mw"].append(None)
         else:
             raw_metrics = p1_result  # Use Path 1 metrics directly
+            # Keep all history lists equal length when Path 2/3 are disabled
+            for _k in ("p2_area_um2", "p2_timing_slack_ns", "p2_clock_period_ns",
+                       "p2_dynamic_power_mw", "p3_execution_cycles", "p3_dynamic_power_mw"):
+                history[_k].append(None)
 
         # ── Normalise & report to Ax ─────────────────────────────────────────
         normalizer.update(raw_metrics)

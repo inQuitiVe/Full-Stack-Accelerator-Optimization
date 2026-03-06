@@ -69,6 +69,21 @@
 **基於上述痛點與觀察，本研究的動機如下：**
 我們亟需一套框架，不僅能自動化地同步搜尋軟硬體參數 (Full-Stack Co-design)，還必須能夠將 EDA 參數 (如 `syn_map_effort`, `compile_ultra` 旗標) 納入最佳化的一環。更重要的是，該框架必須具備某種機制 (如提早停止或快速黑盒子合成)，來大幅縮短耗時的硬體評估流程，從而讓大規模的高維度 DSE 成為可能。
 
+2.5 相關文獻探討 (Related Works)
+要實現高能效的邊緣運算加速器，過去的研究多半從分析模型、架構探索或底層編譯優化等不同切入點進行，可概分為以下三個主要發展方向：
+
+1. 深度學習與記憶體內運算之評估框架 (DNN and PIM Evaluation Frameworks)
+針對硬體加速器的設計空間，過去已有諸多分析模型被提出。例如，Timeloop 提出了一套系統化的評估基礎設施，能夠透過精簡的表示法來探索 DNN 加速器的資料流 (Dataflow) 與記憶體階層設計；而 CiMLoop 則是專為記憶體內運算 (Compute-In-Memory) 所設計的靈活建模工具，能跨層次評估 CiM 系統的硬體效能。然而，這類基於分析模型 (Analytical Models) 的工具雖然評估速度極快，卻缺乏真實 RTL 邏輯合成的驗證。它們難以捕捉到實際電路在經過繞線與邏輯閘優化後的真實面積，亦無法精確反映出時序違例 (Timing Violations) 的硬性限制。
+
+2. 架構探索與軟硬體協同設計 (Architecture Exploration and SW-HW Co-Design)
+針對超維度運算 (HDC) 與 PIM 的結合，HDnn-PIM 架構 透過結合特徵擷取與 HDC，展現了極佳的高能效潛力，但該研究仰賴人工靜態設計，並未對架構進行自動化的參數探索。在設計空間探索 (DSE) 方面，HierCGRA 針對大規模粗粒度可重組架構 (CGRA) 提出了階層式的建模與探索框架，以應對龐大的設計空間。近期的研究 更進一步針對 HD-PIM 提出了多目標軟硬體協同最佳化，並利用噪音感知 (Noise-Aware) 的貝葉斯最佳化尋找最佳架構參數。儘管這些前瞻研究成功引入了 BO 來處理軟硬體參數的耦合，但它們仍將底層的 EDA 工具視為不可動的黑盒子，且未提出能從根本上加速 RTL 合成時間的機制，導致高維度探索在實務上仍受困於高昂的時間瓶頸。
+
+3. 高階合成與 EDA 參數最佳化 (HLS and EDA Parameter Tuning)
+為了解決 EDA 工具預設策略在優化上的侷限性，部分研究開始將焦點轉向硬體編譯與綜合階段的參數調校。例如，Sun 等人 針對高階合成 (High-Level Synthesis, HLS) 指令，提出了具備相關性的多目標多層次保真度 (Multi-fidelity) 最佳化方法；而 REMOTune 則利用隨機嵌入 (Random Embedding) 與多目標信賴區間貝葉斯最佳化 (Trust-region BO)，在高維度的 VLSI 設計流程中調校 EDA 工具的綜合與佈局繞線參數。這些研究明確證實了動態調整 EDA 參數對推動 PPA 極限的巨大貢獻，但它們的優化範圍僅侷限於硬體與 EDA 階層，並未向上延伸至軟體演算法層面產生協同效應。
+
+小結 (Summary)：
+綜合上述，目前的文獻要不是「專注於軟硬體參數，但忽略 EDA 策略且受限於 RTL 評估速度」，就是「專注於 EDA 參數調校，卻無法與軟體演算法產生聯合效應」。本研究提出的全端協同設計框架，正是為了填補此一空白：不僅將探索維度擴張至包含軟體、硬體與 EDA 策略，更透過首創的「快速黑盒子合成機制」打破了 RTL 評估的耗時瓶頸，使得真正意義上的全端 (Full-Stack) 多目標最佳化成為可能。
+
 ---
 
 # 3. 提出的全端設計空間探索框架 (Proposed Full-Stack DSE Framework)
@@ -121,9 +136,10 @@
 
 我們將以下參數交由 BO 動態決策：
 1. **`synth_profile` (綜合輪廓)**：提供高層級的策略預設。
-   - `balanced_default`：標準的 `compile_ultra` 與時脈閘控 (Clock gating)。
-   - `timing_aggressive`：開啟重定時 (`-retime`) 與高時序優化腳本，犧牲面積換取極限速度。
-   - `power_aggressive`：啟用面積導向腳本 (`-area_high_effort_script`) 追求極致微縮。
+   - `balanced_default`：標準的 `compile_ultra`、時脈閘控與 `set_max_area 0`。
+   - `timing_aggressive`：`set_max_area 0` + 重定時 (`-retime`) 與高時序優化腳本，犧牲面積換取極限速度。
+   - `power_aggressive`：時脈閘控 + 漏電/動態優化 + `compile_ultra -gate_clock`，追求極致功耗優化。
+   - `area_aggressive`：`set_max_area 0 -ignore_tns` + 面積導向腳本，追求極致微縮（可能違反時序）。
    - `exact_map`：保留 RTL 階層，確保精準對應。
 2. **`syn_map_effort` 與 `syn_opt_effort`**：控制對映 (Mapping) 與優化 (Optimization) 階段的努力度等級 (`low`/`medium`/`high`)。
 
@@ -149,13 +165,13 @@
 **表一：Full-Stack DSE 搜尋空間 (Search Space)**
 | 領域 (Domain) | 參數名稱 (Parameter) | 型別 (Type) | 數值範圍或選項 (Values / Bounds) | 說明 (Description) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Software** | `hd_dim` | Choice (int) | [1024, 2048, 4096, 8192] | 超維度向量長度，主導模型準確率與運算規模 |
+| **Software** | `hd_dim` | Choice (int) | [2048, 4096, 8191] | 超維度向量長度；上限 8191（HAMMING_DIST_WIDTH=13） |
 | **Software** | `inner_dim` | Choice (int) | [1024, 2048, 4096] | HD Encoder 的內部轉換維度 |
 | **Hardware** | `reram_size` | Choice (int) | [64, 128, 256] | RRAM 陣列大小，影響 PIM 計算能力與面積 |
 | **Hardware** | `cnn_x_dim_*` / `cnn_y_dim_*`| Choice (int) | [8, 16] | PatterNet 中 CNN PE 陣列的長寬規模 (各層) |
 | **Hardware** | `encoder_x_dim` / `encoder_y_dim`| Choice (int) | [8, 16] | Encoder 的處理單元數量 |
 | **Hardware** | `out_channels_*`, `kernel_size_*`| Choice (int) | 依網路架構而定 | 卷積神經網路的特徵提取參數 |
-| **EDA** | `synth_profile` | Choice (str) | [`balanced_default`, `timing_aggressive`, `power_aggressive`, `exact_map`] | DC 合成策略預設腳本 |
+| **EDA** | `synth_profile` | Choice (str) | [`balanced_default`, `timing_aggressive`, `power_aggressive`, `area_aggressive`, `exact_map`] | DC 合成策略預設腳本 |
 | **EDA** | `syn_map_effort` | Choice (str) | [`low`, `medium`, `high`] | DC 映射階段的優化努力度 |
 | **EDA** | `syn_opt_effort` | Choice (str) | [`low`, `medium`, `high`] | DC 整體優化階段的努力度 |
 
@@ -169,6 +185,9 @@
 在貝葉斯最佳化中，我們使用 **超體積 (Hypervolume, HV)** 作為衡量 Pareto 前緣 (Pareto Front) 品質的單一指標。我們將尋求在特定硬性限制 (Constraints，例如 Accuracy $\geq 0.79$) 下，最大化這四個指標所形成的超體積。
 
 ## 4.4 實驗組別設計 (Baseline Configurations)
+
+本框架的搜尋空間由 `conf/params_prop/cimloop.yaml` 定義，可透過 `run_exploration.py` 執行 DSE。輸出 `dse_results.json` 除最終目標外，亦包含 Path 2/3 原始指標（p2_area_um2、p2_timing_slack_ns、p3_execution_cycles 等）。
+
 為了驗證本框架在不同面向的貢獻，我們設計了以下四大實驗情境 (Scenarios)：
 
 1. **協同設計效益分析 (Impact of Full-Stack Co-Design)**：
@@ -202,7 +221,7 @@
 
 實驗結果顯示：
 * 切換至 `timing_aggressive` 策略 (開啟 `-retime` 與高時序努力度) 時，合成出的時脈週期可比 `balanced_default` 縮短約 $10\% \sim 15\%$，代價是晶片面積與漏電功耗 (Leakage Power) 有所上升。
-* 相反地，使用 `power_aggressive` 策略則能將面積進一步壓縮，適合對時序要求較寬鬆但極端受限於功耗的邊緣場景。
+* 使用 `power_aggressive` 策略可進一步優化功耗，適合對時序要求較寬鬆但極端受限於功耗的邊緣場景；`area_aggressive` 則專注於面積極小化，可能犧牲時序。
 * 調整 `syn_map_effort` 至 `high` 雖然增加了編譯時間，但經常能發掘更佳的邏輯閘映射方式，改善整體 PPA。
 本實驗強烈證明：**將 EDA 綜合策略開放給 DSE 探索，能夠為硬體加速器「擠出」最後一哩路的效能極限**。
 

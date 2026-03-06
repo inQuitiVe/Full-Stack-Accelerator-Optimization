@@ -133,16 +133,22 @@ def main(cfg: DictConfig) -> None:
         eda_port=args.eda_port,
     )
 
-    # Dump results
+    # Dump results — include all history keys (param as list of dicts, None stays null)
     import json
+
+    def _serialize_value(v):
+        """Convert a history list to JSON-serialisable form."""
+        if not v:
+            return v
+        first = v[0]
+        if isinstance(first, dict):
+            return v  # param dicts — keep as-is
+        return v  # numeric / None — json.dump handles these natively
+
     output_file = os.path.join(os.getcwd(), "dse_results.json")
     with open(output_file, "w") as f:
         json.dump(
-            {
-                k: v if not isinstance(v[0] if v else None, dict) else [str(x) for x in v]
-                for k, v in history.items()
-                if k != "param"
-            },
+            {k: _serialize_value(v) for k, v in history.items()},
             f,
             indent=2,
         )

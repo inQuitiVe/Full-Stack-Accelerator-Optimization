@@ -1,14 +1,16 @@
 """
-parse_vcs.py — VCS Gate-Level Simulation & PrimeTime PX report parser (Path 3).
+parse_vcs.py — VCS Gate-Level Simulation report parser (Path 3).
 
 Extracts:
   execution_cycles  : int    (cycle-accurate count from VCS simulation log)
-  dynamic_power_mw  : float  (mW, from PtPX power report using SAIF activity)
-  leakage_power_mw  : float  (mW)
+  total_sim_time_ps : int    (optional)
+  clock_period_ns   : float  (optional)
+  equivalent_latency_us : float (optional)
+
+Power analysis (PtPX) is removed; Path 3 uses DC report_power for power metrics.
 
 Expected files in `reports_dir/`:
   vcs_simulation.log   — VCS stdout captured by Makefile (contains $display output)
-  ptpx_power.rpt       — PrimeTime PX power report
 
 Testbench $display conventions for LFSR-based testbenches:
   tb_core_timing.sv / tb_hd_top_timing.sv output:
@@ -25,9 +27,6 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
-from .parse_dc import _scale_power
-
-
 # ── VCS Simulation Log Parser ─────────────────────────────────────────────────
 
 def _parse_vcs_log(log_text: str) -> Dict[str, Any]:
@@ -42,8 +41,19 @@ def _parse_vcs_log(log_text: str) -> Dict[str, Any]:
       "Execution cycles: 12345"
       "SIM_CYCLES: 12345"
 
+    In addition to the primary cycle count, we also parse:
+      - "Total sim time      = 3013234000"
+      - "Clock period        = 4.0 ns"
+      - "Equivalent latency  = 3013.168 us"
+    when present in the log, so that Path 3 can report both cycle-based
+    and wall-clock based metrics.
     Returns:
-        {"execution_cycles": int}
+        {
+          "execution_cycles":      int,
+          "total_sim_time_ps":     int   | None,
+          "clock_period_ns":       float | None,
+          "equivalent_latency_us": float | None,
+        }
     """
     # ── Cycle Count ──────────────────────────────────────────────────────────
     # Ordered by priority: LFSR TB format first, then legacy formats.
@@ -51,9 +61,12 @@ def _parse_vcs_log(log_text: str) -> Dict[str, Any]:
         # Primary: new LFSR-based testbenches (tb_core_timing.sv / tb_hd_top_timing.sv)
         re.compile(r"COMPUTE CYCLES\s*:\s*([0-9]+)", re.IGNORECASE),
         # Legacy fallbacks
-        re.compile(r"Total cycles:\s*([0-9]+)", re.IGNORECASE),
-        re.compile(r"Execution cycles:\s*([0-9]+)", re.IGNORECASE),
-        re.compile(r"SIM_CYCLES:\s*([0-9]+)", re.IGNORECASE),
+        # Accept both ':' and '=' as separators, e.g.
+        #   "Total cycles: 12345"
+        #   "Total cycles        = 12345"
+        re.compile(r"Total cycles\s*[:=]\s*([0-9]+)", re.IGNORECASE),
+        re.compile(r"Execution cycles\s*[:=]\s*([0-9]+)", re.IGNORECASE),
+        re.compile(r"SIM_CYCLES\s*[:=]\s*([0-9]+)", re.IGNORECASE),
     ]
     cycles = None
     for pat in cycle_patterns:
@@ -66,49 +79,53 @@ def _parse_vcs_log(log_text: str) -> Dict[str, Any]:
         raise ValueError(
             "Could not find cycle count in VCS simulation log.\n"
             "Expected format from LFSR testbench: 'COMPUTE CYCLES      : <N>'\n"
+            "or a legacy line like 'Total cycles = <N>'.\n"
             "Check that tb_core_timing.sv / tb_hd_top_timing.sv outputs this line via $display."
         )
 
-    return {"execution_cycles": cycles}
-
-
-# ── PrimeTime PX Power Report Parser ─────────────────────────────────────────
-
-def _parse_ptpx_power(report_text: str) -> Dict[str, float]:
-    """
-    Extract dynamic and leakage power from PrimeTime PX report.
-    Uses the same regex as parse_dc._parse_power (PtPX format is identical).
-
-    Example lines:
-      Total Dynamic Power    =    10.5423 mW
-      Cell Leakage Power     =   324.1234 uW
-    """
-    dynamic_pattern = re.compile(
-        r"Total Dynamic Power\s+=\s+([0-9.]+)\s+(\w+)", re.IGNORECASE
+    # ── Optional wall-clock style metrics ─────────────────────────────────────
+    # Example lines:
+    #   Total sim time      = 3013234000
+    #   Clock period        = 4.0 ns
+    #   Equivalent latency  = 3013.168 us
+    total_time_re = re.compile(r"Total sim time\s*=\s*([0-9]+)", re.IGNORECASE)
+    clk_period_re = re.compile(
+        r"Clock period\s*=\s*([0-9]*\.?[0-9]+)\s*ns", re.IGNORECASE
     )
-    leakage_pattern = re.compile(
-        r"Cell Leakage Power\s+=\s+([0-9.]+)\s+(\w+)", re.IGNORECASE
+    equiv_lat_re = re.compile(
+        r"Equivalent latency\s*=\s*([0-9]*\.?[0-9]+)\s*us", re.IGNORECASE
     )
 
-    dynamic_match = dynamic_pattern.search(report_text)
-    leakage_match = leakage_pattern.search(report_text)
+    total_time_ps = None
+    clock_period_ns = None
+    equivalent_latency_us = None
 
-    if not dynamic_match:
-        raise ValueError(
-            "Could not find 'Total Dynamic Power' in PtPX report.\n"
-            "Check that pt_shell ran successfully and ptpx_power.rpt is valid."
-        )
+    m_time = total_time_re.search(log_text)
+    if m_time:
+        try:
+            total_time_ps = int(m_time.group(1))
+        except ValueError:
+            total_time_ps = None
 
-    dynamic_mw = _scale_power(float(dynamic_match.group(1)), dynamic_match.group(2))
-    leakage_mw = (
-        _scale_power(float(leakage_match.group(1)), leakage_match.group(2))
-        if leakage_match
-        else 0.0
-    )
+    m_clk = clk_period_re.search(log_text)
+    if m_clk:
+        try:
+            clock_period_ns = float(m_clk.group(1))
+        except ValueError:
+            clock_period_ns = None
+
+    m_lat = equiv_lat_re.search(log_text)
+    if m_lat:
+        try:
+            equivalent_latency_us = float(m_lat.group(1))
+        except ValueError:
+            equivalent_latency_us = None
 
     return {
-        "dynamic_power_mw": dynamic_mw,
-        "leakage_power_mw": leakage_mw,
+        "execution_cycles": cycles,
+        "total_sim_time_ps": total_time_ps,
+        "clock_period_ns": clock_period_ns,
+        "equivalent_latency_us": equivalent_latency_us,
     }
 
 
@@ -116,40 +133,35 @@ def _parse_ptpx_power(report_text: str) -> Dict[str, float]:
 
 def parse_vcs_reports(reports_dir: str) -> Dict[str, Any]:
     """
-    Parse VCS simulation log and PtPX power report to obtain cycle-accurate
-    execution statistics and gate-level dynamic power.
-
-    The LFSR-based testbenches (tb_core_timing.sv / tb_hd_top_timing.sv) output
-    COMPUTE CYCLES for timing accuracy; they do NOT check functional correctness
-    (hw_accuracy is not available from these testbenches). Functional accuracy
-    is provided by Path 1 (PyTorch software model) and carried forward.
+    Parse VCS simulation log. Power analysis (PtPX) is removed; Path 3 uses
+    DC report_power for power metrics.
 
     Returns:
         {
-          "execution_cycles":  int,    # cycle count from LFSR testbench
-          "dynamic_power_mw":  float,  # mW (from PtPX with SAIF toggle activity)
-          "leakage_power_mw":  float,  # mW
+          "execution_cycles":      int,
+          "total_sim_time_ps":     int   | None,
+          "clock_period_ns":       float | None,
+          "equivalent_latency_us": float | None,
         }
 
     Raises:
-        FileNotFoundError: if a required report file is missing.
-        ValueError:        if a required field cannot be extracted.
+        FileNotFoundError: if vcs_simulation.log is missing.
+        ValueError:        if cycle count cannot be extracted.
     """
     reports_path = Path(reports_dir)
-    vcs_log  = reports_path / "vcs_simulation.log"
-    ptpx_rpt = reports_path / "ptpx_power.rpt"
+    vcs_log = reports_path / "vcs_simulation.log"
 
-    for f in [vcs_log, ptpx_rpt]:
-        if not f.exists():
-            raise FileNotFoundError(
-                "Expected report not found: %s\n"
-                "Ensure 'make sim' and 'make power' completed successfully." % f
-            )
+    if not vcs_log.exists():
+        raise FileNotFoundError(
+            "Expected report not found: %s\n"
+            "Ensure 'make sim' completed successfully." % vcs_log
+        )
 
-    sim_metrics   = _parse_vcs_log(vcs_log.read_text(encoding="utf-8", errors="replace"))
-    power_metrics = _parse_ptpx_power(ptpx_rpt.read_text(encoding="utf-8", errors="replace"))
+    sim_metrics = _parse_vcs_log(vcs_log.read_text(encoding="utf-8", errors="replace"))
 
     return {
-        "execution_cycles":  sim_metrics["execution_cycles"],
-        **power_metrics,
+        "execution_cycles":       sim_metrics["execution_cycles"],
+        "total_sim_time_ps":      sim_metrics.get("total_sim_time_ps"),
+        "clock_period_ns":        sim_metrics.get("clock_period_ns"),
+        "equivalent_latency_us":  sim_metrics.get("equivalent_latency_us"),
     }

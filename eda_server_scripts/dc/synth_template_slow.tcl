@@ -141,9 +141,9 @@ set_output_delay [expr CLOCK_PERIOD_PLACEHOLDER * 0.3] -clock clk [all_outputs]
 
 # ── Synthesis Strategy ────────────────────────────────────────────────────────
 # SYNTH_DSE_OPTIONS_PLACEHOLDER
-# (replaced at runtime: set_app_var compile_map_effort, compile_opt_effort, optional clock gating)
+# (replaced at runtime: set_app_var compile_map_effort, compile_opt_effort)
 # SYNTH_PROFILE_PLACEHOLDER
-# (replaced at runtime with the profile-specific compile_ultra command block)
+# (replaced at runtime with granular synthesis strategy from DSE flags)
 
 # ── Reports ───────────────────────────────────────────────────────────────────
 report_area       > reports/report_area.rpt

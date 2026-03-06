@@ -5,15 +5,13 @@
 
 `define HV_LENGTH 2048
 `define INNER_DIM 1024
-// NOTE: HV_SEG_WIDTH must be >= (HAMMING_DIST_WIDTH + CLASS_LABEL_WIDTH) = 20
-// to avoid negative padding width in hd_top.sv and to match the original design.
-// Use 64 here, consistent with the original param.vh default.
-`define HV_SEG_WIDTH 64
+`define HV_SEG_WIDTH 32
 `define RRAM_ROW_ADDR_WIDTH 8
 `define CNN1_INPUTS_NUM 256
 `define CNN1_OUTPUTS_NUM 4
-`define CNN2_INPUTS_NUM 64
+`define CNN2_INPUTS_NUM 16
 `define CNN2_OUTPUTS_NUM 8
-`define ENC_INPUTS_NUM 128
+`define ENC_INPUTS_NUM 64
+`define WEIGHT_MEM_ADDR_WIDTH 5
 
 `endif // CONFIG_MACROS_SVH

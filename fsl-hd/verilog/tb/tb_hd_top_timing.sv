@@ -28,15 +28,19 @@
 //    - Simulation time (ns) at end of each phase
 //    - Total clock cycles consumed
 // ============================================================================
-// `timescale 1ns/1ps
+`timescale 1ns/1ps
 `include "param_opt.vh"
+`include "tb_macros.svh"
 
 module tb_hd_top_timing;
 
 // ---------------------------------------------------------------------------
 //  Timing parameters
 // ---------------------------------------------------------------------------
-localparam real CLK_PERIOD  = 4.0;        // ns  (250 MHz)
+// Core clock period is driven by TB_CLK_PERIOD_NS (from json_to_svh.py),
+// which is derived from the BO `frequency` parameter to stay consistent
+// with the DC create_clock constraint.
+localparam real CLK_PERIOD  = `TB_CLK_PERIOD_NS;
 localparam int  MAX_CYCLES  = 2_000_000;  // watchdog
 
 // ---------------------------------------------------------------------------
@@ -48,14 +52,12 @@ localparam int N_SEG        = `HV_LENGTH / `HV_SEG_WIDTH;         // 128
 // Encoding: how many INPUTS_NUM-groups cover all ENC_INPUTS_NUM features
 localparam int N_ENC_GROUPS = `ENC_INPUTS_NUM / `INPUTS_NUM;       // 16
 
-// inp_buf words reserved for encoding weights (WEIGHT_MEM_ADDR_WIDTH = 5 → 32 entries)
+// inp_buf words reserved for encoding weights (WEIGHT_MEM_ADDR_WIDTH from config_macros.svh)
 // Each hd_enc RF entry = WEIGHT_BUS_WIDTH bits; inp_buf word = HV_SEG_WIDTH bits
 // words_per_rf_row = WEIGHT_BUS_WIDTH / HV_SEG_WIDTH = 256/HV_SEG_WIDTH
-localparam int WORDS_PER_RF_ROW = `WEIGHT_BUS_WIDTH / `HV_SEG_WIDTH;  // e.g. 16 if HV_SEG_WIDTH=16
-localparam int RF_ROWS          = 1 << `WEIGHT_MEM_ADDR_WIDTH;         // 32
-localparam int N_WEIGHT_WORDS   = RF_ROWS * WORDS_PER_RF_ROW;          // 512 (worst case)
-// Cap to a safe upper bound to avoid test running forever
-localparam int N_WEIGHT_WORDS_CAP = (N_WEIGHT_WORDS > 128) ? 128 : N_WEIGHT_WORDS;
+localparam int WORDS_PER_RF_ROW = `WEIGHT_BUS_WIDTH / `HV_SEG_WIDTH;
+localparam int RF_ROWS          = 1 << `WEIGHT_MEM_ADDR_WIDTH;  // dynamic: inner_dim/OUTPUTS_NUM
+localparam int N_WEIGHT_WORDS   = RF_ROWS * WORDS_PER_RF_ROW;
 
 // Input feature words: one 64-bit iFIFO word carries INPUTS_NUM × IDATA_WIDTH bits = 64 bits
 // hd_top reads features from inp_buf[0..N_ENC_GROUPS-1]; we pre-load N_ENC_GROUPS words
@@ -65,10 +67,8 @@ localparam int N_FEAT_WORDS = N_ENC_GROUPS;                            // 16
 // data_buf word = 64 bits → words_per_class = N_SEG * HV_SEG_WIDTH / 64
 localparam int WORDS_PER_CLASS = (N_SEG * `HV_SEG_WIDTH) / 64;        // 32 when HV_SEG_WIDTH=16
 
-// HAM_SEG op_code_cached_long derives num_class from inp_buf config word bits[19:13].
-// Since inp_buf word width = HV_SEG_WIDTH (16 bits), only bits[15:13] are valid.
-// → max 3 bits → num_class 0..7.  We test 8 classes to keep sim time bounded.
-localparam int NUM_CLASSES_SIM  = 8;
+// HAM_SEG config word layout: [15:12]=num_class-1, [11:8]=num_feat_seg-1
+localparam int NUM_CLASSES_SIM  = 10;  // MNIST/CIFAR-10 default
 localparam int N_CLASS_WORDS    = NUM_CLASSES_SIM * WORDS_PER_CLASS;   // 256
 
 // ---------------------------------------------------------------------------
@@ -328,24 +328,40 @@ endtask
 
 // ---------------------------------------------------------------------------
 //  HAM_SEG config word
-//    Stored at inp_buf[64] so it doesn't overlap weights(1..32) or features(0..15).
-//    op_code_cached_long (16 bits, HV_SEG_WIDTH) layout (from hd_top_ctrl):
-//      [12:9]  = num_feat_seg - 1  → 4'b(N_ENC_GROUPS-1)
-//      [15:13] = num_class bits 2:0 → NUM_CLASSES_SIM - 1 (max 7, fits in 3 bits)
-//      [1:0]   = seg_shift_bits offset (0 → addr_step = 1<<4 = 16)
-//    HAM_SEG instruction op_code = inp_buf address holding this config word
+//    Stored at inp_buf[64]. HAM_SEG op_code = 64.
+//    Layout: [15:12] = num_class-1 (4 bits, 0..15), [11:8] = num_feat_seg-1 (4 bits)
+//    NOTE: addr 64 falls within weight range [1..N_WEIGHT_WORDS]; Phase 5 overwrites
+//    it after Phase 2 ENC_PRELOAD, so encoder RF is already loaded. Intentional.
 // ---------------------------------------------------------------------------
 localparam int    HAM_CFG_ADDR       = 64;
-localparam int    HAM_NUM_CLASS_BITS = NUM_CLASSES_SIM - 1;   // 3-bit value 0..7
 localparam logic [15:0] HAM_CFG_WORD =
-    { 3'(HAM_NUM_CLASS_BITS),          // [15:13] num_class
-      4'(N_ENC_GROUPS - 1),             // [12:9]  num_feat_seg - 1
-      9'b0 };                           // [8:0]   addr / shift = 0
+    { 4'(NUM_CLASSES_SIM - 1),          // [15:12] num_class - 1
+      4'(N_ENC_GROUPS - 1),             // [11:8]  num_feat_seg - 1
+      8'b0 };                           // [7:0]   addr / shift = 0
 
 // ---------------------------------------------------------------------------
 //  Main test sequence
 // ---------------------------------------------------------------------------
 int phase_start_cycle;
+
+// ── Waveform Dump for PtPX Toggle-Based Power Analysis ─────────────────────
+// Compile with +define+DUMP_FSDB → FSDB  (preferred; requires VCS -kdb).
+// Default (no define)            → VCD   (always supported by VCS).
+// CWD during ./simv = fsl-hd/   → reports/ is a direct subdirectory.
+//
+// Only the DUT subtree (dut.*) is captured to keep file size manageable.
+// Toggle activity is passed to PrimeTime PX via 'make power' for accurate
+// dynamic power estimation; energy = dynamic_power × compute_cycles × clk.
+initial begin
+`ifdef DUMP_FSDB
+    $fsdbDumpfile("reports/activity.fsdb");
+    $fsdbDumpvars(0, dut);   // depth=0 means all levels under dut
+    $fsdbDumpMDA();           // include multi-dimensional arrays / memories
+`else
+    $dumpfile("reports/activity.vcd");
+    $dumpvars(0, dut);
+`endif
+end
 
 initial begin
     // ── Init ────────────────────────────────────────────────────────────────
@@ -356,13 +372,16 @@ initial begin
     $display(" hd_top Timing Testbench");
     $display("  HV_LENGTH        = %0d",  `HV_LENGTH);
     $display("  HV_SEG_WIDTH     = %0d",  `HV_SEG_WIDTH);
+    $display("  INNER_DIM        = %0d",  `INNER_DIM);
+    $display("  WEIGHT_MEM_W     = %0d",  `WEIGHT_MEM_ADDR_WIDTH);
+    $display("  RF_ROWS          = %0d",  RF_ROWS);
     $display("  N_SEG            = %0d",  N_SEG);
     $display("  ENC_INPUTS_NUM   = %0d",  `ENC_INPUTS_NUM);
     $display("  INPUTS_NUM       = %0d",  `INPUTS_NUM);
     $display("  N_ENC_GROUPS     = %0d",  N_ENC_GROUPS);
     $display("  MAX_CLASS_NUM    = %0d",  `MAX_CLASS_NUM);
     $display("  NUM_CLASSES_SIM  = %0d",  NUM_CLASSES_SIM);
-    $display("  N_WEIGHT_WORDS   = %0d (capped to %0d)", N_WEIGHT_WORDS, N_WEIGHT_WORDS_CAP);
+    $display("  N_WEIGHT_WORDS   = %0d",  N_WEIGHT_WORDS);
     $display("  N_FEAT_WORDS     = %0d",  N_FEAT_WORDS);
     $display("  WORDS_PER_CLASS  = %0d",  WORDS_PER_CLASS);
     $display("  N_CLASS_WORDS    = %0d",  N_CLASS_WORDS);
@@ -376,12 +395,12 @@ initial begin
     report_phase("Reset complete");
 
     // ================================================================
-    // Phase 1: Load encoding weights → inp_buf[1..N_WEIGHT_WORDS_CAP]
+    // Phase 1: Load encoding weights → inp_buf[1..N_WEIGHT_WORDS]
     // ================================================================
     phase_start_cycle = cycle_count;
     $display("[PHASE 1] Store encoding weights to inp_buf (addr=1, %0d words)",
-             N_WEIGHT_WORDS_CAP);
-    store_to_inp_buf(1, N_WEIGHT_WORDS_CAP);
+             N_WEIGHT_WORDS);
+    store_to_inp_buf(1, N_WEIGHT_WORDS);
     wait_queue_empty(50_000, 100);
     report_phase("Phase 1 done: weights loaded");
     $display("          Phase 1 cycles = %0d", cycle_count - phase_start_cycle);

@@ -197,59 +197,82 @@
 
 # ── Synthesis Optimization Parameters (EDA Server) ───────────────────────────
 #
-# synth_profile: High-level strategy preset
-#   balanced_default   : insert_clock_gating + compile_ultra (standard)
-#   timing_aggressive  : compile_ultra -retime -timing_high_effort_script
-#   power_aggressive   : insert_clock_gating + compile_ultra -area_high_effort_script
-#   exact_map          : compile_ultra -exact_map -no_autoungroup (preserves hierarchy)
-#
-- name: synth_profile
-  type: choice
-  values:
-    - balanced_default
-    - timing_aggressive
-    - power_aggressive
-    - exact_map
-  value_type: str
-
-# syn_map_effort: Mapping effort during compile_ultra (for iterative tuning)
-#   Controls optimization quality during the mapping phase: low/medium/high
+# Granular flags (each independent) — expands DSE exploration space.
+# See json_to_svh.py _build_synth_strategy_block for TCL mapping.
 #
 - name: syn_map_effort
   type: choice
-  values:
-    - low
-    - medium
-    - high
+  values: [low, medium, high]
   value_type: str
 
-# syn_opt_effort: Optimization effort (for iterative tuning)
-#   Controls optimization quality during the optimization phase: low/medium/high
-#
 - name: syn_opt_effort
   type: choice
-  values:
-    - low
-    - medium
-    - high
+  values: [low, medium, high]
   value_type: str
 
-# enable_retime: Enable register retiming (beyond timing_aggressive's -retime)
-#   Additional control for timing-critical designs
-#
+# ── Strategy flags (boolean) ───────────────────────────────────────────────
+- name: enable_clock_gating
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: max_area_ignore_tns
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
 - name: enable_retime
   type: choice
-  values:
-    - 'false'
-    - 'true'
+  values: ['false', 'true']
   value_type: str
 
-# enable_gate_clock: Enable gate-level clock gating (independent of insert_clock_gating)
-#   For exploring pure gate-level gating without RTL-level insertion
-#
-- name: enable_gate_clock
+- name: compile_timing_high_effort
   type: choice
-  values:
-    - 'false'
-    - 'true'
+  values: ['false', 'true']
+  value_type: str
+
+- name: compile_area_high_effort
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: compile_ultra_gate_clock
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: compile_exact_map
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: compile_no_autoungroup
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: compile_clock_gating_through_hierarchy
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: enable_leakage_optimization
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: enable_dynamic_optimization
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+- name: enable_enhanced_resource_sharing
+  type: choice
+  values: ['false', 'true']
+  value_type: str
+
+# dp_smartgen_strategy: none | timing | area
+- name: dp_smartgen_strategy
+  type: choice
+  values: [none, timing, area]
   value_type: str

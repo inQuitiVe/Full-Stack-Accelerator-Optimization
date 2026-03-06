@@ -8,9 +8,9 @@ Reads a JSON parameter dictionary (from stdin or function call) and:
   3. Patches `../fsl-hd/tcl/synth_dse.tcl` (from dc/synth_template_*.tcl) with the
      correct `create_clock` period derived from the `frequency` parameter.
   4. Injects TOP_MODULE_PLACEHOLDER with the top_module value ("core" or "hd_top").
-  5. Injects Synthesis Optimization DSE options (syn_map_effort, syn_opt_effort,
-     enable_gate_clock) and the synthesis strategy TCL block from `synth_profile`;
-     optionally adds `-retime` to compile_ultra when `enable_retime` is 'true'.
+  5. Injects Synthesis Optimization DSE options (syn_map_effort, syn_opt_effort)
+     and the synthesis strategy TCL block from granular flags (enable_clock_gating,
+     enable_retime, compile_* options, etc.).
   6. Writes `../fsl-hd/verilog/tb/tb_macros.svh` with Testbench constants for Path 3.
      (LFSR-based testbenches — no hex file paths needed; tb_macros only carries clock period)
 
@@ -139,6 +139,14 @@ def _derive_macros(params: dict) -> Dict[str, Union[int, str]]:
     # Encoder PE count
     enc_inputs_num: int = encoder_x_dim * encoder_y_dim
 
+    # Encoder weight RF: inner_dim = OUTPUTS_NUM (32) × RF_ROWS
+    # WEIGHT_MEM_ADDR_WIDTH = ceil(log2(RF_ROWS))
+    outputs_num: int = 32  # from param_opt.vh
+    rf_rows: int = inner_dim // outputs_num
+    if rf_rows <= 0:
+        raise ValueError(f"inner_dim ({inner_dim}) must be >= OUTPUTS_NUM ({outputs_num}).")
+    weight_mem_addr_width: int = max(1, math.ceil(math.log2(rf_rows)))
+
     # Hypervector segment width: hd_dim / (encoder_x_dim * encoder_y_dim)
     # Integer division — must divide evenly for valid RTL
     if hd_dim % enc_inputs_num != 0:
@@ -193,6 +201,9 @@ def _derive_macros(params: dict) -> Dict[str, Union[int, str]]:
 
         # Encoder spatial mapping
         "ENC_INPUTS_NUM": enc_inputs_num,
+
+        # Encoder weight RF address width (inner_dim / OUTPUTS_NUM rows)
+        "WEIGHT_MEM_ADDR_WIDTH": weight_mem_addr_width,
     }
     return macros
 
@@ -213,36 +224,25 @@ def _write_svh(macros: Dict[str, Union[int, str]], output_path: Path) -> None:
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-# ── Synthesis Strategy Profiles ──────────────────────────────────────────────
-
-# Each profile maps to a list of TCL lines inserted at SYNTH_PROFILE_PLACEHOLDER.
-# All commands are appended to the section AFTER constraints are set and
-# BEFORE the final report commands.
-_SYNTH_PROFILE_TCL: Dict[str, List[str]] = {
-    "balanced_default": [
-        "# Synthesis profile: balanced_default",
-        "set_clock_gating_style -sequential_cell latch",
-        "insert_clock_gating",
-        "compile_ultra",
-    ],
-    "timing_aggressive": [
-        "# Synthesis profile: timing_aggressive",
-        "set_dp_smartgen_options -optimization_strategy timing",
-        "compile_ultra -retime -timing_high_effort_script",
-    ],
-    "power_aggressive": [
-        "# Synthesis profile: power_aggressive",
-        "set_clock_gating_style -sequential_cell latch",
-        "insert_clock_gating",
-        "set_dp_smartgen_options -optimization_strategy area",
-        "compile_ultra -area_high_effort_script",
-    ],
-    "exact_map": [
-        "# Synthesis profile: exact_map",
-        "compile_ultra -exact_map -no_autoungroup",
-    ],
-}
-_DEFAULT_SYNTH_PROFILE = "balanced_default"
+# ── Synthesis Strategy (Granular Flags) ───────────────────────────────────────
+#
+# Replaces the old synth_profile presets. Each flag is independent; TCL is built
+# by composing enabled options. This expands the DSE exploration space.
+#
+# Flag → TCL mapping:
+#   enable_clock_gating              → set_clock_gating_style + insert_clock_gating
+#   max_area_ignore_tns              → set_max_area 0 -ignore_tns (else set_max_area 0)
+#   enable_retime                    → -retime in compile_ultra
+#   compile_timing_high_effort       → -timing_high_effort_script
+#   compile_area_high_effort         → -area_high_effort_script
+#   compile_ultra_gate_clock         → -gate_clock
+#   compile_exact_map                → -exact_map
+#   compile_no_autoungroup           → -no_autoungroup
+#   compile_clock_gating_through_hierarchy → set compile_clock_gating_through_hierarchy true
+#   enable_leakage_optimization      → set_leakage_optimization true
+#   enable_dynamic_optimization      → set_dynamic_optimization true
+#   enable_enhanced_resource_sharing → set compile_enhanced_resource_sharing true
+#   dp_smartgen_strategy            → none | timing | area (set_dp_smartgen_options)
 
 # Synthesis Optimization DSE: valid values for BO-tunable flags (conf/params_prop/cimloop.yaml)
 _EFFORT_LEVELS = ("low", "medium", "high")
@@ -252,10 +252,10 @@ _ENABLE_TRUE = ("true", "1", "yes")
 def _build_synth_dse_options_block(params: dict) -> str:
     """
     Build TCL block for SYNTH_DSE_OPTIONS_PLACEHOLDER from BO params.
-    Injects set_app_var for syn_map_effort / syn_opt_effort and optional
-    gate-level clock gating when enable_gate_clock is 'true'.
+    Injects set_app_var for syn_map_effort / syn_opt_effort only.
+    (Clock gating moved to strategy block via enable_clock_gating.)
     """
-    lines = ["# Synthesis Optimization DSE (syn_map_effort, syn_opt_effort, enable_gate_clock)"]
+    lines = ["# Synthesis Optimization DSE (syn_map_effort, syn_opt_effort)"]
 
     map_effort = str(params.get("syn_map_effort", "medium")).strip().lower()
     if map_effort not in _EFFORT_LEVELS:
@@ -267,10 +267,67 @@ def _build_synth_dse_options_block(params: dict) -> str:
         opt_effort = "medium"
     lines.append("set_app_var compile_opt_effort " + opt_effort)
 
-    gate_clock = str(params.get("enable_gate_clock", "false")).strip().lower()
-    if gate_clock in _ENABLE_TRUE:
+    return "\n".join(lines)
+
+
+def _is_true(params: dict, key: str, default: bool = False) -> bool:
+    """Check if a param is truthy ('true', '1', 'yes')."""
+    val = str(params.get(key, "false" if not default else "true")).strip().lower()
+    return val in _ENABLE_TRUE
+
+
+def _build_synth_strategy_block(params: dict) -> str:
+    """
+    Build TCL block for SYNTH_PROFILE_PLACEHOLDER from granular synthesis flags.
+    Each flag is independent; TCL commands are composed in a sensible order.
+    """
+    lines = ["# Synthesis strategy (granular flags from DSE)"]
+
+    # 1) Resource sharing (before compile)
+    if _is_true(params, "enable_enhanced_resource_sharing"):
+        lines.append("set compile_enhanced_resource_sharing true")
+
+    # 2) DP Smartgen strategy
+    dp_strat = str(params.get("dp_smartgen_strategy", "none")).strip().lower()
+    if dp_strat in ("timing", "area"):
+        lines.append(f"set_dp_smartgen_options -optimization_strategy {dp_strat}")
+
+    # 3) Max area (secondary optimization target)
+    if _is_true(params, "max_area_ignore_tns"):
+        lines.append("set_max_area 0 -ignore_tns")
+    else:
+        lines.append("set_max_area 0")
+
+    # 4) RTL-level clock gating
+    if _is_true(params, "enable_clock_gating"):
         lines.append("set_clock_gating_style -sequential_cell latch")
         lines.append("insert_clock_gating")
+
+    # 5) Power / hierarchy clock gating
+    if _is_true(params, "compile_clock_gating_through_hierarchy"):
+        lines.append("set compile_clock_gating_through_hierarchy true")
+    if _is_true(params, "enable_leakage_optimization"):
+        lines.append("set_leakage_optimization true")
+    if _is_true(params, "enable_dynamic_optimization"):
+        lines.append("set_dynamic_optimization true")
+
+    # 6) compile_ultra with optional flags
+    cu_flags: List[str] = []
+    if _is_true(params, "enable_retime"):
+        cu_flags.append("-retime")
+    if _is_true(params, "compile_timing_high_effort"):
+        cu_flags.append("-timing_high_effort_script")
+    if _is_true(params, "compile_area_high_effort"):
+        cu_flags.append("-area_high_effort_script")
+    if _is_true(params, "compile_ultra_gate_clock"):
+        cu_flags.append("-gate_clock")
+    if _is_true(params, "compile_exact_map"):
+        cu_flags.append("-exact_map")
+    if _is_true(params, "compile_no_autoungroup"):
+        cu_flags.append("-no_autoungroup")
+
+    cu_cmd = "compile_ultra" + (" " + " ".join(cu_flags) if cu_flags else "")
+    lines.append(cu_cmd)
 
     return "\n".join(lines)
 
@@ -310,60 +367,18 @@ def _inject_synth_dse_options(output_path: Path, params: dict) -> None:
     output_path.write_text(content, encoding="utf-8")
 
 
-def _apply_retime_if_requested(output_path: Path, params: dict) -> None:
-    """If enable_retime is 'true', add -retime to the first compile_ultra occurrence in the TCL file."""
-    enable_retime = str(params.get("enable_retime", "false")).strip().lower()
-    if enable_retime not in _ENABLE_TRUE:
-        return
-    content = output_path.read_text(encoding="utf-8")
-    # Only add -retime if not already present (e.g. timing_aggressive already has it)
-    if "-retime" in content:
-        return
-    content = content.replace("compile_ultra ", "compile_ultra -retime ", 1)
-    output_path.write_text(content, encoding="utf-8")
-
-
-def _inject_synth_profile(profile: str, template_path: Path, output_path: Path) -> None:
+def _inject_synth_strategy(output_path: Path, params: dict) -> None:
     """
-    Replace the SYNTH_PROFILE_PLACEHOLDER token in the TCL template with the
-    multi-line synthesis strategy block for the given profile.
-
-    The template file must contain exactly one line of the form:
-        # SYNTH_PROFILE_PLACEHOLDER
-
-    Raises:
-        ValueError           if the profile is unknown or placeholder is missing.
-        FileNotFoundError    if the template does not exist.
+    Replace the SYNTH_PROFILE_PLACEHOLDER token in the TCL file with the
+    synthesis strategy block built from granular flags.
     """
-    if not template_path.exists():
-        raise FileNotFoundError(
-            f"TCL template not found: {template_path}\n"
-            "Create 'hardware/dc/synth_template.tcl' with a "
-            "'# SYNTH_PROFILE_PLACEHOLDER' line."
-        )
-
-    profile = str(profile).strip()
-    if profile not in _SYNTH_PROFILE_TCL:
-        # Defensive: BO may pass wrong value (e.g. inner_dim); fall back to default
-        import warnings
-        warnings.warn(
-            f"Unknown synth_profile {profile!r}, using {_DEFAULT_SYNTH_PROFILE}. "
-            f"Valid choices: {list(_SYNTH_PROFILE_TCL)}"
-        )
-        profile = _DEFAULT_SYNTH_PROFILE
-
-    tcl_content = template_path.read_text(encoding="utf-8")
     placeholder = "# SYNTH_PROFILE_PLACEHOLDER"
-    if placeholder not in tcl_content:
-        raise ValueError(
-            f"TCL template does not contain '{placeholder}'. "
-            "Cannot inject synthesis strategy."
-        )
-
-    strategy_block = "\n".join(_SYNTH_PROFILE_TCL[profile])
-    patched = tcl_content.replace(placeholder, strategy_block)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(patched, encoding="utf-8")
+    content = output_path.read_text(encoding="utf-8")
+    if placeholder not in content:
+        return
+    strategy_block = _build_synth_strategy_block(params)
+    content = content.replace(placeholder, strategy_block)
+    output_path.write_text(content, encoding="utf-8")
 
 
 # ── Testbench Macro Generation ────────────────────────────────────────────────
@@ -456,18 +471,15 @@ def translate(params: dict) -> None:
     _patch_tcl_clock(frequency_hz, tcl_template, TCL_OUTPUT)
     _inject_top_module(TCL_OUTPUT, top_module)
     _inject_synth_dse_options(TCL_OUTPUT, params)
-
-    synth_profile: str = str(params.get("synth_profile", _DEFAULT_SYNTH_PROFILE))
-    _inject_synth_profile(synth_profile, TCL_OUTPUT, TCL_OUTPUT)
-    _apply_retime_if_requested(TCL_OUTPUT, params)
+    _inject_synth_strategy(TCL_OUTPUT, params)
 
     _write_tb_macros(params, TB_MACROS_OUTPUT)
 
     print(
         "[json_to_svh] Written %s (%d macros, clock=%.3f ns, "
-        "synth_mode=%s, top_module=%s, profile=%s)" % (
+        "synth_mode=%s, top_module=%s)" % (
             SVH_OUTPUT.name, len(macros), 1e9 / frequency_hz,
-            synth_mode, top_module, synth_profile,
+            synth_mode, top_module,
         )
     )
 

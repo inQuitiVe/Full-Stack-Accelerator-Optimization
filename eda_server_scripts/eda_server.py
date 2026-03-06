@@ -68,11 +68,80 @@ task_queue: queue.Queue = queue.Queue()
 job_registry: Dict[int, Dict[str, Any]] = {}
 registry_lock = threading.Lock()
 
+# ── Params Logging Categories ──────────────────────────────────────────────────
+PARAMS_HARDWARE = frozenset({
+    "hd_dim", "reram_size", "inner_dim", "frequency",
+    "encoder_x_dim", "encoder_y_dim",
+    "cnn_x_dim_1", "cnn_y_dim_1", "cnn_x_dim_2", "cnn_y_dim_2",
+    "out_channels_1", "out_channels_2",
+})
+PARAMS_SOFTWARE = frozenset({
+    "kernel_size_1", "kernel_size_2",
+    "stride_1", "stride_2", "padding_1", "padding_2", "dilation_1", "dilation_2",
+})
+PARAMS_SYNTH_FLOW = frozenset({
+    "synth_mode", "top_module",
+    "syn_map_effort", "syn_opt_effort",
+    "enable_clock_gating", "max_area_ignore_tns", "enable_retime",
+    "compile_timing_high_effort", "compile_area_high_effort", "compile_ultra_gate_clock",
+    "compile_exact_map", "compile_no_autoungroup", "compile_clock_gating_through_hierarchy",
+    "enable_leakage_optimization", "enable_dynamic_optimization", "enable_enhanced_resource_sharing",
+    "dp_smartgen_strategy",
+})
+
+
+def _format_params_for_log(params: Dict[str, Any]) -> str:
+    """Format params into categorized multi-line log for readability."""
+    hw = {k: v for k, v in params.items() if k in PARAMS_HARDWARE}
+    sw = {k: v for k, v in params.items() if k in PARAMS_SOFTWARE}
+    flow = {k: v for k, v in params.items() if k in PARAMS_SYNTH_FLOW}
+    other = {k: v for k, v in params.items()
+             if k not in PARAMS_HARDWARE and k not in PARAMS_SOFTWARE and k not in PARAMS_SYNTH_FLOW}
+
+    def _fmt_section(title: str, items: dict) -> str:
+        if not items:
+            return ""
+        pairs = [f"{k}={v}" for k, v in sorted(items.items())]
+        # Wrap at ~100 chars, join with ", " for readability
+        lines, buf = [], []
+        for p in pairs:
+            if buf and sum(len(x) for x in buf) + len(buf) * 2 + len(p) > 100:
+                lines.append("    " + ", ".join(buf))
+                buf = []
+            buf.append(p)
+        if buf:
+            lines.append("    " + ", ".join(buf))
+        return f"  {title}\n" + "\n".join(lines)
+
+    parts = []
+    if hw:
+        parts.append(_fmt_section("Hardware:", hw))
+    if sw:
+        parts.append(_fmt_section("Software:", sw))
+    if flow:
+        parts.append(_fmt_section("Synth/Flow:", flow))
+    if other:
+        parts.append(_fmt_section("Other:", other))
+    return "\n".join(p for p in parts if p) or "(empty)"
+
+
+def _format_metrics_for_log(metrics: Dict[str, Any]) -> str:
+    """Format metrics dict into short lines (one key=value per line)."""
+    lines = []
+    for k, v in sorted(metrics.items()):
+        if isinstance(v, float):
+            lines.append(f"    {k}={v:.4g}")
+        elif isinstance(v, int) and abs(v) >= 1e6:
+            lines.append(f"    {k}={float(v):.4g}")
+        else:
+            lines.append(f"    {k}={v}")
+    return "\n".join(lines) if lines else "    (empty)"
+
 
 def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False) -> None:
     """
     Called from the worker thread: translate params, run DC synthesis, parse results.
-    When run_path3=True, also runs VCS gate-level simulation + PtPX power analysis.
+    When run_path3=True, also runs VCS gate-level simulation (PtPX power analysis disabled).
 
     Path 3 uses LFSR-based testbenches (tb_core_timing.sv or tb_hd_top_timing.sv)
     selected by top_module in params. No hex data transfer is required.
@@ -92,10 +161,11 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False)
     top_module = str(params.get("top_module", "core")).strip().lower()
 
     phase_label = "Path 3 (VCS+PtPX only, reuse DC)" if run_path3 else "Path 2 (synth only)"
-    logger.info(
-        f"[Job {job_id}] Starting {phase_label} "
-        f"[synth_mode={synth_mode}, top_module={top_module}] params: {params}"
-    )
+    logger.info("[Job %d] Starting %s  [synth_mode=%s, top_module=%s]",
+                job_id, phase_label, synth_mode, top_module)
+    for line in _format_params_for_log(params).splitlines():
+        if line.strip():
+            logger.info("[Job %d] %s", job_id, line.rstrip())
 
     try:
         if not run_path3:
@@ -135,14 +205,14 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False)
             logger.info(f"[Job {job_id}] Synthesis complete.")
         else:
             # ── Path 3: reuse existing DC artifacts ────────────────────────────
-            logger.info(
-                f"[Job {job_id}] Path 3: reusing existing DC netlist/reports in {REPORTS_DIR}, "
-                "skipping make synth."
-            )
+            logger.info("[Job %d] Path 3: reusing existing DC netlist/reports.", job_id)
+            logger.info("[Job %d]   (skipping make synth)", job_id)
 
         # Step 3: Parse DC report files (both Path 2 and Path 3 need these metrics)
         metrics = parse_dc_reports(str(REPORTS_DIR))
-        logger.info(f"[Job {job_id}] Parsed DC metrics: {metrics}")
+        logger.info("[Job %d] Parsed DC metrics:", job_id)
+        for line in _format_metrics_for_log(metrics).splitlines():
+            logger.info("[Job %d] %s", job_id, line.strip())
 
         # Step 4: Gate 2 — check timing
         if metrics.get("timing_slack_ns", 0.0) < 0.0:
@@ -160,9 +230,8 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False)
         # The Makefile selects the correct TB based on TOP_MODULE:
         #   top_module=core    → tb_core_timing.sv  (full wrapper, off-chip FIFO protocol)
         #   top_module=hd_top  → tb_hd_top_timing.sv (HD core only, direct interface)
-        logger.info(
-            f"[Job {job_id}] Starting gate-level simulation (VCS, top_module={top_module})."
-        )
+        logger.info("[Job %d] Starting gate-level simulation (VCS).", job_id)
+        logger.info("[Job %d]   top_module=%s", job_id, top_module)
         sim_result = subprocess.run(
             ["make", "sim",
              "SYNTH_MODE=" + synth_mode,
@@ -180,28 +249,12 @@ def _run_synthesis(job_id: int, params: Dict[str, Any], run_path3: bool = False)
             )
         logger.info(f"[Job {job_id}] VCS simulation complete.")
 
-        # Step 5: Run PrimeTime PX for cycle-accurate dynamic power
-        logger.info(f"[Job {job_id}] Starting PtPX power analysis.")
-        power_result = subprocess.run(
-            ["make", "power",
-             "TOP_MODULE=" + top_module],
-            cwd=str(MAKEFILE_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            timeout=SYNTH_TIMEOUT_SECONDS,
-        )
-        if power_result.returncode != 0:
-            err_out = (power_result.stderr or power_result.stdout or "")[-2000:]
-            raise RuntimeError(
-                "make power failed (exit %s):\n%s" % (power_result.returncode, err_out)
-            )
-        logger.info(f"[Job {job_id}] PtPX power analysis complete.")
-
-        # Step 6: Parse VCS + PtPX reports
+        # Step 5 (power analysis disabled): parse VCS simulation log only
         from parsers.parse_vcs import parse_vcs_reports
         vcs_metrics = parse_vcs_reports(str(REPORTS_DIR))
-        logger.info(f"[Job {job_id}] Parsed VCS/PtPX metrics: {vcs_metrics}")
+        logger.info("[Job %d] Parsed VCS metrics:", job_id)
+        for line in _format_metrics_for_log(vcs_metrics).splitlines():
+            logger.info("[Job %d] %s", job_id, line.strip())
 
         # Merge: Path 3 upgrades power + adds cycle count; keeps DC area (unchanged by sim)
         combined_metrics = {**metrics, **vcs_metrics}
@@ -267,15 +320,12 @@ def _handle_submit(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     task_queue.put((job_id, params, run_path3))
-    logger.info(
-        "[Job %d] Accepted and queued (%s, synth_mode=%s, top_module=%s, queue depth: %d)." % (
-            job_id,
-            "Path 3 (VCS+PtPX)" if run_path3 else "Path 2 (synth only)",
-            params.get("synth_mode", "slow"),
-            params.get("top_module", "core"),
-            task_queue.qsize(),
-        )
-    )
+    phase = "Path 3 (VCS+PtPX)" if run_path3 else "Path 2 (synth only)"
+    logger.info("[Job %d] Accepted and queued.", job_id)
+    logger.info("[Job %d]   %s", job_id, phase)
+    logger.info("[Job %d]   synth_mode=%s  top_module=%s  queue=%d",
+                job_id, params.get("synth_mode", "slow"),
+                params.get("top_module", "core"), task_queue.qsize())
     return {"job_id": job_id, "status": "accepted"}
 
 

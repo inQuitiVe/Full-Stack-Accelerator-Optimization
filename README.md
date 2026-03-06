@@ -1,6 +1,6 @@
 # Full-Stack Accelerator Optimization Framework
 
-**Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture  
+**Focus:** Multi-fidelity Design Space Exploration (DSE) for HDnn-PIM Architecture
 **Status:** Phase 2 (Baseline Exploration) + Path 3 (LFSR Gate-Level Verification) Implemented
 
 All architecture and flow diagrams (Mermaid) are in **[README_IMAGES.md](README_IMAGES.md)**.  
@@ -96,10 +96,11 @@ The `synth_profile` parameter selects a multi-line TCL strategy block that is in
 
 | `synth_profile` (YAML) | DC TCL Commands Generated | Strategy Goal |
 | :--- | :--- | :--- |
-| `timing_aggressive` | `compile_ultra -retime -timing_high_effort_script`<br/>`set_dp_smartgen_options -optimization_strategy timing` | Meet strict clock periods at the cost of area/power. |
-| `power_aggressive` | `insert_clock_gating`<br/>`compile_ultra -area_high_effort_script`<br/>`set_dp_smartgen_options -optimization_strategy area` | Minimize area and dynamic power. |
-| `balanced_default` | `insert_clock_gating`<br/>`compile_ultra` (default) | Standard compilation. |
-| `exact_map` | `compile_ultra -exact_map -no_autoungroup` | Preserves hierarchies for precise logic mapping. |
+| `balanced_default` | `insert_clock_gating` + `set_max_area 0` + `compile_ultra` | Standard compilation; secondary area reduction. |
+| `timing_aggressive` | `set_max_area 0` + `compile_ultra -retime -timing_high_effort_script` | Meet strict clock periods (no clock gating). |
+| `power_aggressive` | Clock gating + `set_leakage_optimization` + `set_dynamic_optimization` + `compile_ultra -gate_clock` | Minimize power (Power Compiler recommended). |
+| `area_aggressive` | `set_max_area 0 -ignore_tns` + `compile_ultra -area_high_effort_script` | Minimize area; may violate timing. |
+| `exact_map` | `compile_ultra -exact_map -no_autoungroup` | Preserves RTL hierarchy; minimal optimization. |
 
 Invalid values (e.g., a mis-mapped integer like `"1024"`) are automatically mapped back to `balanced_default` with a warning on the server, preventing BO bugs from crashing the flow.
 
@@ -116,18 +117,31 @@ In addition to `synth_profile`, several scalar flags are tuned by BO and transla
 
 These flags are fully implemented in `_build_synth_dse_options_block()` and `_apply_retime_if_requested()` inside `json_to_svh.py`.
 
-### 5.3 Software-to-RTL Mapping Table
+**Synth Decision Diagram:** See [docs/synth_decision_diagram.md](docs/synth_decision_diagram.md) for the `SYNTH_MODE` (slow/fast) × `TOP_MODULE` (core/hd_top) decision matrix.
+
+### 5.3 Output Format (`dse_results.json`)
+
+Each run writes `dse_results.json` with final stitched metrics plus Path 2/3 raw data:
+
+| Key | Description |
+| :--- | :--- |
+| `accuracy`, `energy_uj`, `timing_us`, `area_mm2`, `hv` | Final objectives (used for Pareto / Hypervolume) |
+| `param` | List of BO parameter dicts per trial |
+| `p2_area_um2`, `p2_timing_slack_ns`, `p2_clock_period_ns`, `p2_dynamic_power_mw` | Path 2 ASIC metrics (EDA synthesis) |
+| `p3_execution_cycles`, `p3_dynamic_power_mw` | Path 3 VCS/PtPX metrics (gate-level simulation) |
+
+### 5.4 Software-to-RTL Mapping Table
 Implemented in `eda_server_scripts/json_to_svh.py`.
 
 | Software Parameter | Hardware Macro (`config_macros.svh`) | Mathematical Conversion |
 | :--- | :--- | :--- |
 | `reram_size` | `` `RRAM_ROW_ADDR_WIDTH `` | `ceil(log2(reram_size))` |
-| `hd_dim` | `` `HV_LENGTH `` | Direct |
+| `hd_dim` | `` `HV_LENGTH `` | Direct; **max 8191** (HAMMING_DIST_WIDTH=13 ⇒ 2^13−1) |
 | `inner_dim` | `` `INNER_DIM `` | Direct |
 | `cnn_x_dim_1` × `cnn_y_dim_1` | `` `CNN1_INPUTS_NUM `` | Product |
 | `cnn_x_dim_2` × `cnn_y_dim_2` | `` `CNN2_INPUTS_NUM `` | Product |
 | `encoder_x_dim` × `encoder_y_dim` | `` `ENC_INPUTS_NUM `` | Product |
-| `hd_dim` / (`encoder_x_dim` × `encoder_y_dim`) | `` `HV_SEG_WIDTH `` | Integer division, with additional structural constraints (must be ≥ `HAMMING_DIST_WIDTH + CLASS_LABEL_WIDTH`, divide `WEIGHT_BUS_WIDTH`, and satisfy `TRAINING_DATA_NUM * HV_SEG_WIDTH ≤ SP_TRAINING_WIDTH`). |
+| `hd_dim` / (`encoder_x_dim` × `encoder_y_dim`) | `` `HV_SEG_WIDTH `` | Integer division; `hd_dim ≤ 8191` (2^13−1); must be ≥ `HAMMING_DIST_WIDTH + CLASS_LABEL_WIDTH`, divide `WEIGHT_BUS_WIDTH`, and satisfy `TRAINING_DATA_NUM * HV_SEG_WIDTH ≤ SP_TRAINING_WIDTH`. |
 | `frequency` | DC TCL `create_clock -period` | `1e9 / frequency` (ns) |
 
 ---
@@ -145,8 +159,12 @@ Full-Stack-Accelerator-Optimization/
 │   │   └── core_algorithm/            # BO Engine & Dynamic Normalizer
 │   │
 │   ├── HDnn-PIM-Opt/                  # Pure software evaluator (Path 1 / Cimloop)
-│   └── conf/                          # Hydra configurations (YAML)
+│   ├── conf/                          # Hydra configurations (YAML)
+│   │   └── params_prop/               # cimloop.yaml (search space definition)
+│   └── outputs/                      # Hydra output dirs (dse_results.json, run_exploration.log)
 │
+├── docs/                              # Documentation
+│   └── synth_decision_diagram.md     # SYNTH_MODE × TOP_MODULE decision diagram (Mermaid)
 └── eda_server_scripts/                # Scripts deployed onto the remote EDA server (often as full-stack-opt/ alongside fsl-hd/)
     ├── eda_server.py                  # Socket Server (Queue + Timeout, run_path3 flag, SYNTH_MODE/TOP_MODULE forwarding)
     ├── json_to_svh.py                 # Macro & TCL generation (clock, TOP_MODULE, synthesis flags, TB macros)
@@ -170,5 +188,7 @@ Full-Stack-Accelerator-Optimization/
 - [x] Establish VCS → PtPX SAIF handoff pipeline (`Makefile sim/power` + `parse_vcs.py` with `COMPUTE CYCLES` regex).
 - [x] Create LFSR-based timing testbenches (`tb_core_timing.sv` / `tb_hd_top_timing.sv`) driven by `TB_CLK_PERIOD_NS` and selected via `TOP_MODULE`.
 - [x] Replace hex-data-based Path 3 with a `run_path3` flag and on-server LFSR stimulus generation (no PyTorch HEX transfer).
+- [x] Persist Path 2/3 raw metrics in `dse_results.json` (p2_area_um2, p2_timing_slack_ns, p3_execution_cycles, etc.).
+- [x] `synth_profile` extended with `area_aggressive`; `hd_dim` upper bound enforced at 8191.
 - [ ] Define hard boundary constraints for all BO parameters (min/max bounds).
 - [ ] **Cross-Path Calibration:** Use Path 2/3 physical data to calibrate Path 1 analytical models.
