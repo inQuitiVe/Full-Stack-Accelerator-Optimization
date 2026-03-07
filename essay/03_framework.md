@@ -1,58 +1,102 @@
 # 3. 提出的全端設計空間探索框架 (Proposed Full-Stack DSE Framework)
 
-為了解決高維度參數耦合與硬體評估過於耗時的問題，我們提出了一套基於多目標貝葉斯最佳化 (Multi-Objective BO) 的全自動化全端協同設計框架。本框架具備去耦合架構 (Decoupled Architecture)、多層次保真度 (Multi-Fidelity) 評估，以及首創的快速黑盒子合成機制 (Fast Black-Box Synthesis)。
+本節詳述所提框架的系統架構、多層次保真度評估管道、黑盒子快速合成機制，以及 EDA 細粒度策略探索。圖 1（概念性）描繪整體流程；以下分小節說明各模組。
 
-## 3.1 系統架構：Thin-Client 黑盒子 API 模型
-由於商用 EDA 工具 (如 Synopsys Design Compiler, VCS) 通常受到嚴格的授權 (License) 與內網環境限制，難以直接與現代基於 Python/Docker 的機器學習與 BO 框架綁定。為此，我們設計了 **Thin-Client (瘦客戶端) 系統架構**：
+## 3.1 系統架構：Thin-Client 解耦模型 (System Architecture: Thin-Client Decoupled Model)
 
-* **Client 端 (BO Engine)**：運行於 Docker 容器內，負責執行貝葉斯最佳化演算法 (使用 Meta Ax 框架)、PyTorch 軟體神經網路訓練，以及架構級的效能模擬 (Cimloop/Timeloop)。Client 端扮演 DSE 的「大腦」。
-* **EDA Server 端 (硬體評估中心)**：運行於具有 EDA 授權的遠端 Linux 伺服器上。Server 端暴露了一個基於 TCP Socket 的非同步 API。當 Client 產生一組新的參數組合時，會將其打包為 JSON 格式發送給 Server。Server 負責將參數動態轉換為 SystemVerilog 標頭檔 (`config_macros.svh`) 與 TCL 腳本，並驅動 Design Compiler 進行合成。最終，Server 僅將解析後的數值化 PPA 指標回傳給 Client。
+商用 EDA 工具（如 Synopsys Design Compiler、VCS）通常受授權與內網限制，難以與 Python/Docker 型 BO 框架直接綁定。為此，我們設計 **Thin-Client 解耦架構**：
 
-這種 Decoupled API 模式不僅解決了授權問題，更使得架構具備極高的擴充性，未來可輕鬆替換後端的 EDA 工具或叢集。
+**表 3-1：Thin-Client 架構角色分工**
 
-## 3.2 多層次保真度評估與提早停止機制 (Multi-Fidelity Evaluation and Gatekeeping)
-為避免在無效的設計上浪費昂貴的合成時間，我們將單次評估 (Evaluation) 拆分為三個具備「提早停止 (Early Stopping/Gatekeeping)」機制的層次 (Paths)：
+| 端點 | 職責 | 關鍵元件 |
+| :--- | :--- | :--- |
+| **Client** | BO 演算法、軟體訓練、架構模擬 | Ax/BoTorch、PyTorch、Cimloop/Timeloop |
+| **EDA Server** | 參數→RTL 轉換、合成、模擬、指標萃取 | json_to_svh.py、DC、VCS、PrimeTime PX |
 
-1. **Path 1: 軟體模擬 (Software Simulation - Fast)**
-   - 流程：Client 端利用 PyTorch 訓練 HDnn 模型，並取得軟體準確率 (Accuracy)。同時，利用分析模型 (Analytical Models，如 Cimloop) 進行初步的 RRAM 能量與延遲估算。
-   - **Gate 1 (準確率門檻)**：若此參數組合訓練出的模型準確率低於使用者定義的底線 (如 79%)，BO 引擎會立即將此 Trial 標記為失敗 (Failed)，終止評估，**完全跳過後續的硬體合成**。
+Client 將參數打包為 JSON 發送至 Server；Server 動態產生 `config_macros.svh` 與 `synth_dse.tcl`，驅動 DC 合成，並僅回傳數值化 PPA 指標。此解耦模式解決授權問題，並具備高擴充性。
 
-2. **Path 2: 硬體合成與混合拼接 (Hardware Synthesis and Stitching - Medium)**
-   - 流程：通過 Gate 1 的參數將被送往 EDA Server 進行邏輯合成。由於 PIM 加速器中的 RRAM 類比陣列部分沒有標準的 RTL，我們採用「混合拼接 (Stitching)」策略：
-     - `總面積 (Area) = 數位邏輯面積 (來自 EDA) + RRAM 面積 (來自 Cimloop)`
-     - `總延遲 (Delay) = 數位邏輯時脈週期 (來自 EDA) + RRAM 讀寫延遲 (來自 Cimloop)`
-   - **Gate 2 (時序門檻)**：若合成出的電路發生嚴重的時序違例 (Timing Violation, Slack < 0)，表示此架構在給定的頻率下無法實作，該 Trial 將被判定為失敗，BO 模型會記錄此硬性限制。
+## 3.2 多層次保真度評估與提早停止 (Multi-Fidelity Evaluation and Gatekeeping)
 
-3. **Path 3: 閘級模擬與功耗驗證 (Gate-Level Simulation & Power Verification - High Fidelity)**
-   - Path 3 僅在「通過 Gate 2 且使用者啟用 Path 3」時被觸發。Client 端只需在送往 EDA Server 的 JSON 請求中加入 `run_path3=True` 旗標，Server 便會在 Path 2 合成完成且無時序違例時，自動進一步執行閘級模擬與功耗分析。
-   - 為了避免從 PyTorch 傳輸大量 `.hex` 測試資料到 EDA 主機，我們改採 **LFSR-based Testbench**：在硬體專案 `fsl-hd/verilog/tb/` 中，提供 `tb_core_timing.sv` 與 `tb_hd_top_timing.sv` 兩個測試平台，分別對應 `core` 以及 `hd_top` 兩種頂層。這些 Testbench 會以 LFSR 自行產生輸入序列，並在有限狀態機 (FSM) 內部精確記錄「ENC_PRELOAD → oFIFO result」之間的 **計算週期數 (`COMPUTE CYCLES`)**，同時產生 SAIF 活動檔供 PrimeTime PX 使用。
-   - PrimeTime PX 讀取 SAIF 檔與合成後網表，回傳閘級動態功耗與漏電功耗；設計框架則將 Path 2 的時脈週期 (clock period) 與 Path 3 的執行週期數 (execution cycles) 相乘，得到更高保真度的 ASIC 延遲估計，再與 Cimloop 的 RRAM 延遲與能量加總，形成最終的多目標指標。RRAM 區塊在實驗中依然沒有真實 RTL，因此其 PPA 仍以 Cimloop 為唯一來源。
+為避免在無效設計上浪費昂貴合成時間，我們將單次評估拆分為三階段，並在每階段設置提早停止門檻。
 
-## 3.3 核心創新：快速黑盒子合成機制 (Fast Black-Box Synthesis Mode)
-即使用了 Gatekeeping 機制，留下來需要進行邏輯合成的參數組合依然非常龐大。我們進一步分析 HDnn-PIM 的硬體特性發現：在 DSE 過程中，**被改變的參數僅影響 HD 核心邏輯** (如 Hypervector 寬度、Encoder 單元數等)。而佔據極大面積的 CNN 特徵提取器 (PatterNet)、固定的 SRAM Buffer 與系統介面，在整個搜尋過程中是完全靜態的。
+### 3.2.1 Path 1：軟體模擬 (Fast)
 
-為此，我們提出了 **「快速合成模式 (Fast Mode)」**：
-* 在產生 TCL 腳本時，我們使用**白名單 (Whitelist) 機制**，僅將隨參數變動的 SystemVerilog 檔案 (如 `hd_enc.sv`, `hd_search.sv`) 加入 `analyze` 清單。
-* 刻意**不引入**靜態且龐大的 PatterNet 模組。Design Compiler 在 `elaborate` 與 `link` 階段會找不到這些模組，進而將其視為**黑盒子 (Black Box)**。
-* **效益與影響**：在這種由下而上 (Bottom-up) 的黑盒子合成下，EDA 工具會將未定義模組的面積與功耗視為 0，並迅速完成剩餘邏輯的合成。這使得**單次合成時間從接近 1 小時驟降至數分鐘內**。由於 PatterNet 等靜態模組的 PPA 在整個 DSE 中可視為常數，將常數移除並**不影響 BO 觀察參數變動的「相對趨勢」**。BO 依然能準確無誤地朝向真正的 Pareto 最佳解收斂。
+Client 端以 PyTorch 訓練 HDnn 模型並取得 Accuracy，同時以 Cimloop 估算 RRAM 能量與延遲。
 
-進一步地，我們將 **「合成模式 (synth_mode)」** 與 **「頂層模組 (top_module)」** 做到完全解耦：
+**Gate 1**：若 Accuracy 低於使用者定義門檻 \(\tau\)（如 0.79），該 Trial 標記為失敗，**完全跳過後續硬體合成**。
 
-* `synth_mode ∈ {slow, fast}`：控制是否將 PatterNet 等靜態模組納入 DC 合成中。`slow` 會重新合成全系統；`fast` 則維持黑盒子模式，只針對 HD 核心邏輯進行增量合成。
-* `top_module ∈ {core, hd_top}`：控制 DC Elaborate 以及 Path 3 Testbench 的觀測範圍。`core` 代表從 SoC 封裝視角觀察 (含 `chip_interface` / FIFO 等介面邏輯)；`hd_top` 則只聚焦在超維度核心本身。
+### 3.2.2 Path 2：硬體合成與混合拼接 (Medium)
 
-透過這兩個正交的維度，本框架可以支援 2D 的實驗組合：例如在前期 DSE 用 `synth_mode=fast, top_module=hd_top` 快速掃描 HD 核心的趨勢，最後再以 `synth_mode=slow, top_module=core` 對少數 Pareto 候選進行高保真度的全系統驗證。
+通過 Gate 1 的參數送往 EDA Server 進行邏輯合成。由於 RRAM 缺乏標準 RTL，我們採用混合拼接策略：
 
-## 3.4 EDA 綜合策略的多維度探索 (Synthesis Optimization Exploration)
-傳統硬體 DSE 往往將 EDA 工具視為固定且被動的編譯器，忽視了綜合腳本對最終電路效能的影響。本框架打破了這個限制，將 **Design Compiler 的綜合策略 (Synthesis Flags) 直接納入 BO 的搜尋空間**。
+\[
+A_{\text{total}} = A_{\text{ASIC}} + A_{\text{RRAM}}, \quad T_{\text{total}} = T_{\text{ASIC}} + T_{\text{RRAM}}, \quad E_{\text{total}} = P_{\text{ASIC}} \cdot T_{\text{total}} + E_{\text{RRAM}}
+\]
 
-我們將以下參數交由 BO 動態決策：
-1. **`synth_profile` (綜合輪廓)**：提供高層級的策略預設。
-   - `balanced_default`：標準的 `compile_ultra`、時脈閘控與 `set_max_area 0`。
-   - `timing_aggressive`：`set_max_area 0` + 重定時 (`-retime`) 與高時序優化腳本，犧牲面積換取極限速度。
-   - `power_aggressive`：時脈閘控 + 漏電/動態優化 + `compile_ultra -gate_clock`，追求極致功耗優化。
-   - `area_aggressive`：`set_max_area 0 -ignore_tns` + 面積導向腳本，追求極致微縮（可能違反時序）。
-   - `exact_map`：保留 RTL 階層，確保精準對應。
-2. **`syn_map_effort` 與 `syn_opt_effort`**：控制對映 (Mapping) 與優化 (Optimization) 階段的努力度等級 (`low`/`medium`/`high`)。
+**Gate 2**：若合成網表發生時序違例（Slack \(< 0\)），該 Trial 判定失敗，Path 3 不觸發。
 
-透過將「硬體架構參數」與「EDA 綜合參數」聯合優化，BO 可以在遇到架構層面的時序瓶頸時，主動切換至 `timing_aggressive` 的 EDA 策略來彌補，從而發掘出單獨調整架構或單獨調整腳本都無法達到的隱藏 Pareto 最佳點。
+### 3.2.3 Path 3：閘級模擬與功耗驗證 (High Fidelity)
+
+Path 3 僅在「通過 Gate 2 且使用者啟用 Path 3」時觸發。Client 在 JSON 中加入 `run_path3=True`，Server 於合成完成且無違例後執行 VCS 閘級模擬與 PrimeTime PX 功耗分析。
+
+**LFSR-based Testbench**：為避免從 PyTorch 傳輸大量 `.hex` 測試資料，我們採用 LFSR 自產生測試平台 (`tb_core_timing.sv` / `tb_hd_top_timing.sv`)，精確記錄 ENC_PRELOAD → oFIFO 的 **COMPUTE CYCLES**，並產生 SAIF 供 PtPX 使用。Testbench 支援 `inner_dim` 驅動的 `N_WEIGHT_WORDS` 與 10 classes（MNIST/CIFAR-10）。
+
+**Path 3 指標拼接公式**：
+
+\[
+T_{\text{ASIC}} = \frac{T_{\text{clk}} \times N_{\text{cycles}}}{1000} \text{ (µs)}, \quad E_{\text{ASIC}} = (P_{\text{dyn}} + P_{\text{leak}}) \times T_{\text{ASIC}}
+\]
+
+**表 3-2：LFSR Testbench 指令序列**
+
+| 階段 | 指令 | 資料 | 目的 |
+| :--- | :--- | :--- | :--- |
+| Pre-setup | STORE_BUF | Encoding weights | inp_buf[1..N_WEIGHT_WORDS] |
+| Pre-setup | STORE_BUF | Class HVs | data_buf[0..N_CLASS_WORDS-1] |
+| Per-inference | STORE_BUF | Input features | inp_buf[0..N_FEAT_WORDS-1] |
+| Compute | ENC_PRELOAD | — | inp_buf → encoder RF |
+| Compute | ENC_SEG | — | Encode → HV segments |
+| Compute | STORE_BUF | HAM config | inp_buf[0] 或 inp_buf[64] |
+| Compute | HAM_SEG | — | Hamming distance search |
+| Compute | PRED | — | 輸出預測至 oFIFO |
+
+## 3.3 黑盒子快速合成機制 (Fast Black-Box Synthesis Mode)
+
+即便有 Gatekeeping，通過的 Trial 仍眾多。我們分析 HDnn-PIM RTL 發現：**DSE 參數僅影響 HD 核心邏輯**（Encoder、Search 等），而 PatterNet、系統介面等大型模組在搜尋過程中完全靜態。
+
+**快速合成模式 (Fast Mode)** 作法：
+
+1. **白名單機制**：僅將隨參數變動的 SystemVerilog 檔（如 `hd_enc.sv`、`hd_search.sv`）加入 DC `analyze` 清單。
+2. **黑盒子化**：刻意不引入 PatterNet 等靜態模組，DC 在 elaborate/link 階段將其視為 Black Box。
+3. **效益**：單次合成時間由約 45–60 分鐘降至 3–5 分鐘（約 10×–15× 加速）。由於靜態模組 PPA 為常數，移除不影響 BO 觀察的相對趨勢。
+
+**synth_mode × top_module 二維決策**：
+
+| | top_module=core | top_module=hd_top |
+| :--- | :--- | :--- |
+| synth_mode=slow | 全系統合成；tb_core_timing | HD 核心；tb_hd_top_timing |
+| synth_mode=fast | PatterNet 黑盒；tb_core_timing | HD 核心；tb_hd_top_timing |
+
+前期 DSE 可採用 `synth_mode=fast, top_module=hd_top` 快速掃描；對少數 Pareto 候選再以 `synth_mode=slow, top_module=core` 進行高保真驗證。
+
+## 3.4 EDA 細粒度策略探索 (Granular EDA Strategy Exploration)
+
+傳統 DSE 將 EDA 工具視為固定編譯器。本框架將 **Design Compiler 的細粒度合成旗標直接納入 BO 搜尋空間**，將過去整包式策略拆解為多個獨立布林/選擇參數，大幅擴展探索空間。
+
+**表 3-3：細粒度綜合旗標與 DC TCL 對應**
+
+| YAML 參數 | DC 效果（啟用時） |
+| :--- | :--- |
+| enable_clock_gating | set_clock_gating_style + insert_clock_gating |
+| max_area_ignore_tns | set_max_area 0 -ignore_tns |
+| enable_retime | compile_ultra -retime |
+| compile_timing_high_effort | -timing_high_effort_script |
+| compile_area_high_effort | -area_high_effort_script |
+| compile_ultra_gate_clock | -gate_clock |
+| compile_exact_map | -exact_map |
+| compile_no_autoungroup | -no_autoungroup |
+| enable_leakage_optimization | set_leakage_optimization true |
+| enable_dynamic_optimization | set_dynamic_optimization true |
+| dp_smartgen_strategy | none \| timing \| area → set_dp_smartgen_options |
+
+此外，`syn_map_effort` 與 `syn_opt_effort` 控制對映與優化努力度 (`low`/`medium`/`high`)。透過硬體架構與 EDA 策略聯合優化，BO 可在遭遇時序瓶頸時主動啟用 `enable_retime` 等策略彌補，發掘單一領域優化無法觸及的 Pareto 點。
