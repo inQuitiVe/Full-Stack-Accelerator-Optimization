@@ -1,7 +1,7 @@
 param:
   # model parameters
   hd_dim: 4000
-  frequency: 1e8
+  frequency: 2e8
   out_channels_1: 64
   kernel_size_1: 7
   stride_1: 2

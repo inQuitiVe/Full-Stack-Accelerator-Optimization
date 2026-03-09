@@ -93,7 +93,7 @@ evaluator:
     # f1: 200
     # d1: 128
     # kron: false
-    frequency: 1e8
+    frequency: 2e8
     out_channels_1: 64
     kernel_size_1: 7
     stride_1: 2

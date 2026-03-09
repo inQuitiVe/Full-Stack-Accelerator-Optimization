@@ -394,7 +394,7 @@ def _write_tb_macros(params: dict, output_path: Path) -> None:
     Generated macros:
       TB_CLK_PERIOD_NS — full clock period in ns (drives the clock generator in the TB)
     """
-    frequency_hz: float = float(params.get("frequency", 1e8))
+    frequency_hz: float = float(params.get("frequency", 2e8))
     period_ns: float = round(1e9 / frequency_hz, 4)
 
     lines = [
@@ -463,7 +463,7 @@ def translate(params: dict) -> None:
     macros = _derive_macros(params)
     _write_svh(macros, SVH_OUTPUT)
 
-    frequency_hz: float = float(params.get("frequency", 1e8))
+    frequency_hz: float = float(params.get("frequency", 2e8))
     synth_mode: str = str(params.get("synth_mode", "slow")).strip().lower()
     top_module: str = str(params.get("top_module", "core")).strip().lower()
     tcl_template = TCL_TEMPLATE_FAST if synth_mode == "fast" else TCL_TEMPLATE_SLOW

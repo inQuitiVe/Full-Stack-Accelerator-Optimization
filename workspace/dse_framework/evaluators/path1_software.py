@@ -81,6 +81,18 @@ def evaluate_path1(
             f"Attempted path: {_HDNN_ROOT}\nOriginal error: {exc}"
         ) from exc
 
+    # ── 中繼檢查：確保 frequency 有傳入且不低於 200 MHz ─────────────────────
+    _FREQ_MIN_HZ = int(2e8)  # 200 MHz
+    freq = int(params.get("frequency", 0))
+    if freq < _FREQ_MIN_HZ:
+        _log.warning(
+            f"[Path1] frequency={freq} Hz ({freq/1e6:.0f} MHz) < {_FREQ_MIN_HZ/1e6:.0f} MHz; "
+            f"clamping to {_FREQ_MIN_HZ} Hz for timeloop/cimloop."
+        )
+        params = dict(params)
+        params["frequency"] = _FREQ_MIN_HZ
+    _log.info(f"[Path1] Passing params to Evaluator (frequency={params.get('frequency')} Hz = {params.get('frequency', 0)/1e6:.0f} MHz)")
+
     evaluator = Evaluator(data_args, training_args, hardware_args, cwd, _eval_log)
 
     # The Evaluator.evaluate() API expects a list (one item per GPU worker)
@@ -92,12 +104,14 @@ def evaluate_path1(
     result = results[0]
     # result format: {"accuracy": (value, sem), "power": (value, sem),
     #                 "performance": (value, sem), "area": (value, sem)}
-    # Note: "power" in the sim code stores energy (uJ); we rename it here for clarity.
+    # Note: sim/metrics/cimloop uses _normalize(x) = x/BASE (BASE=3000) for power,
+    #       performance, area. We must denormalize to get raw units (uJ, us, mm²).
+    _BASE = 3000.0
 
     accuracy: float = result["accuracy"][0]
-    energy_uj: float = result["power"][0]        # sim uses "power" key for energy (uJ)
-    timing_us: float = result["performance"][0]  # us
-    area_mm2: float = result["area"][0]          # mm^2
+    energy_uj: float = result["power"][0] * _BASE
+    timing_us: float = result["performance"][0] * _BASE
+    area_mm2: float = result["area"][0] * _BASE
 
     _log.info(
         f"[Path1] accuracy={accuracy:.4f}, energy={energy_uj:.3f}uJ, "

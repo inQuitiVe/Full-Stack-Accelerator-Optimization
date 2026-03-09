@@ -7,7 +7,7 @@ Responsibilities:
      since the RRAM does not have real RTL and Cimloop remains its ground truth.
   3. Stitch the ASIC data (from EDA) with RRAM data (from Cimloop):
        total_timing_us = asic_clock_period_ns * (1e-3) + rram_delay_us
-       total_energy_uj = (asic_dynamic_mw * total_timing_us) + rram_energy_uj
+       total_energy_uj = (asic_dynamic_mw * total_timing_us) * 1e-3 + rram_energy_uj
        total_area_mm2  = asic_area_um2 * (1e-6) + rram_area_mm2
   4. Return the canonical metrics dict. If EDA fails, return {"status": "failed"}.
 
@@ -83,7 +83,7 @@ def _evaluate_rram_cimloop(
         raise RuntimeError(f"Cannot import Cimloop dependencies: {exc}") from exc
 
     reram_size: int = int(params["reram_size"])
-    frequency: int = int(params.get("frequency", int(1e8)))
+    frequency: int = int(params.get("frequency", int(2e8)))
 
     # Load a single test sample as the activity input for Cimloop
     dataset_name: str = data_args["dataset"]
@@ -131,10 +131,10 @@ def _stitch_metrics(
         total_timing_us = clock_period_ns * 1e-3 + rram_delay_us
         (ASIC and RRAM treated as sequential)
 
-    Energy formula (once real hardware data is available):
-        dynamic_energy_uj  = asic_dynamic_power_mw * total_timing_us
-        leakage_energy_uj  = asic_leakage_power_mw * total_timing_us
-        total_energy_uj    = dynamic_energy_uj + leakage_energy_uj + rram_energy_uj
+    Energy formula (Power × Time, unit conversion):
+        E (µJ) = P (mW) × t (µs) × 1e-3   (since 1 mW × 1 µs = 1 nJ = 1e-3 µJ)
+        asic_energy_uj  = (dynamic_power_mw + leakage_power_mw) * total_timing_us * 1e-3
+        total_energy_uj  = asic_energy_uj + rram_energy_uj
     """
     clock_period_ns: float = asic_metrics["clock_period_ns"]
     dynamic_power_mw: float = asic_metrics["dynamic_power_mw"]
@@ -155,8 +155,8 @@ def _stitch_metrics(
 
     total_timing_us: float = asic_timing_us + rram_delay_us
 
-    # Energy  (Power × Time)
-    asic_energy_uj: float = (dynamic_power_mw + leakage_power_mw) * total_timing_us
+    # Energy  (Power × Time); 1 mW × 1 µs = 1 nJ → × 1e-3 for µJ
+    asic_energy_uj: float = (dynamic_power_mw + leakage_power_mw) * total_timing_us * 1e-3
     total_energy_uj: float = asic_energy_uj + rram_energy_uj
 
     # Area (convert ASIC um^2 → mm^2)

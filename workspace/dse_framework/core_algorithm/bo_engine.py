@@ -64,6 +64,7 @@ def _build_ax_client(
     params_prop: List[Dict[str, Any]],
     num_sobol_trials: int,
     acqf_name: str,
+    seed: int = 42,
 ) -> AxClient:
     """
     Construct an AxClient with a SOBOL → BOTORCH_MODULAR GenerationStrategy.
@@ -86,7 +87,11 @@ def _build_ax_client(
         verbose_logging=False,
         generation_strategy=GenerationStrategy(
             [
-                GenerationStep(_Models.SOBOL, num_trials=num_sobol_trials),
+                GenerationStep(
+                    _Models.SOBOL,
+                    num_trials=num_sobol_trials,
+                    model_kwargs={"seed": seed},
+                ),
                 GenerationStep(
                     _Models.BOTORCH_MODULAR,
                     num_trials=-1,
@@ -172,7 +177,8 @@ def run_bo(
         A history dict with lists of observed values:
         {"accuracy", "energy_uj", "timing_us", "area_mm2", "hv", "param"}
     """
-    from sim.flow.utils import process_params_prop, set_seed
+    from dse_framework.utils import set_seed
+    from sim.flow.utils import process_params_prop
     from dse_framework.evaluators.path1_software import evaluate_path1
     from dse_framework.evaluators.path2_hardware import evaluate_path2, evaluate_path3
 
@@ -194,12 +200,14 @@ def run_bo(
     )
 
     params_prop = process_params_prop(args["params_prop"])
-    cli = _build_ax_client(params_prop, num_sobol, acqf_name)
+    cli = _build_ax_client(params_prop, num_sobol, acqf_name, seed=args["seed"])
 
     history: Dict[str, List] = {
         # Final stitched objectives (used for Pareto / HV)
         "accuracy": [], "energy_uj": [], "timing_us": [],
         "area_mm2": [], "hv": [], "param": [],
+        # Path 1 raw metrics (software simulation)
+        "p1_accuracy": [], "p1_energy_uj": [], "p1_timing_us": [], "p1_area_mm2": [],
         # Path 2 raw ASIC metrics (EDA synthesis)
         "p2_area_um2": [], "p2_timing_slack_ns": [],
         "p2_clock_period_ns": [], "p2_dynamic_power_mw": [],
@@ -209,6 +217,7 @@ def run_bo(
 
     for iteration in tqdm(range(num_epochs), desc="BO Iterations"):
         # ── Generate next candidate ──────────────────────────────────────────
+        set_seed(args["seed"])
         if iteration < num_sobol:
             model = Models.SOBOL(
                 experiment=cli.experiment,
@@ -227,9 +236,11 @@ def run_bo(
         logger.info(f"[Trial {trial_idx}] {_format_trial_params(param, params_prop)}")
 
         # ── Path 1: Software Simulation ──────────────────────────────────────
+        set_seed(args["seed"])
+        data_args_trial = {**data_args, "seed": args["seed"]}
         try:
             p1_result = evaluate_path1(
-                param, data_args, training_args, hardware_args, cwd,
+                param, data_args_trial, training_args, hardware_args, cwd,
                 logger_override=logger,
                 evaluator_logger=_sim_logger,
             )
@@ -321,6 +332,10 @@ def run_bo(
         history["timing_us"].append(raw_metrics["timing_us"])
         history["area_mm2"].append(raw_metrics["area_mm2"])
         history["param"].append(param)
+        history["p1_accuracy"].append(p1_result["accuracy"])
+        history["p1_energy_uj"].append(p1_result.get("energy_uj"))
+        history["p1_timing_us"].append(p1_result.get("timing_us"))
+        history["p1_area_mm2"].append(p1_result.get("area_mm2"))
 
         # ── Hypervolume ──────────────────────────────────────────────────────
         try:

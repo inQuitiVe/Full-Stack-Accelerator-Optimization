@@ -71,7 +71,7 @@
 #   value_type: bool
 - name: frequency
   type: fixed
-  value: 1e8
+  value: 2e8
   value_type: int
 # - name: frequency
 #   type: choice
