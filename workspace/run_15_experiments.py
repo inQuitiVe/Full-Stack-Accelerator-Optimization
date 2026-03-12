@@ -1,10 +1,8 @@
 """
-run_15_experiments.py — 22-point differentiated experiment for Path 2/Path 3 validation.
+run_15_experiments.py — encoder_x_dim 掃描實驗，hd_dim 與 inner_dim 固定。
 
-Design: 22 fixed parameter configurations across 6 groups to maximize result
-differentiation and highlight the importance of Path 2 (EDA synthesis) and Path 3
-(gate-level simulation). Frequency tuned per actual DSE results to reduce Gate 2 failures.
-Group F compares core vs hd_top synthesis time on same small arch.
+Design: (HD_DIM, encoder_x, encoder_y) 設計對，inner_dim 固定，其餘用 DEFAULT_PARAMS。
+約束：hd_dim % (enc_x*enc_y) == 0，20 <= HV_SEG_WIDTH <= 64（SP_TRAINING_WIDTH=512）。
 
 Usage (from workspace/ directory):
   python3 run_15_experiments.py                           # Path 1 only
@@ -13,7 +11,7 @@ Usage (from workspace/ directory):
   python3 run_15_experiments.py --path2 --path3 --eda-host 132.239.17.21 --eda-port 5000
   python3 run_15_experiments.py --path2 --synth-mode slow # Use slow (full) synthesis
 
-Output: dse_22_p1.json / dse_22_p1p2.json / dse_22_p1p2p3.json with all metrics per data point.
+Output: dse_15_p1.json / dse_15_p1p2.json / dse_15_p1p2p3.json
 """
 
 from __future__ import annotations
@@ -47,6 +45,13 @@ for _name in ("ax", "ax.service", "ax.core", "sim"):
 # ── Default params (merged with each experiment) ───────────────────────────────
 DEFAULT_PARAMS = {
     "frequency": int(2e8),
+    "reram_size": 128,
+    "out_channels_1": 8,
+    "kernel_size_1": 5,
+    "out_channels_2": 16,
+    "kernel_size_2": 3,
+    "hd_dim": 2048,
+    "inner_dim": 1024,
     "stride_1": 2,
     "stride_2": 1,
     "padding_1": 0,
@@ -76,132 +81,20 @@ DEFAULT_PARAMS = {
     "dp_smartgen_strategy": "none",
 }
 
-# ── 32 Experiment Configurations ─────────────────────────────────────────────
-# Group A (DP 1–5): EDA strategy impact — fixed arch, varying EDA flags, all 100 MHz
-# Group B (DP 6–10): Architecture gradient — varying SW/HW params, all 100 MHz
-# Group C (DP 11–13): inner_dim gradient — Path 3 cycle count differentiation, all 100 MHz
-# Group D (DP 14–16): Frequency sweep on small arch — 125/150/150 MHz
-# Group E (DP 17–20): Gate 2 pressure — large arch, low vs high EDA, 125/100 MHz
-# Group F (DP 21–22): core vs hd_top — same small arch, compare p2/p3 elapsed time
-# Group G (DP 23–32): DP 12 retry + extended frequency sweep — inner_dim 2048 & base/small arch
-#
-# frequency (Hz): 2e8=200MHz minimum; 2.25e8=225MHz, 2.5e8=250MHz, 2.75e8=275MHz, 3e8=300MHz
-# Tuned per actual DSE results to reduce Gate 2 failures (200 MHz → fail for mid/large arch).
-# Do NOT enable compile_timing_high_effort and compile_area_high_effort together (DC conflict).
-# reram_size unified to 128 where applicable.
+# ── Experiments: (HD_DIM, encoder_x, encoder_y) 設計對 ───────────────────────────
+# 約束：hd_dim % (enc_x*enc_y) == 0，20 <= HV_SEG_WIDTH <= 64（SP_TRAINING_WIDTH=512）
+INNER_DIM = 1024
+# (hd_dim, encoder_x, encoder_y) 每組皆滿足 Path 2 約束
+HD_DIM_ENCODER_PAIRS: List[tuple[int, int, int]] = [
+    (2048, 4, 8),   # enc_product=32,  HV_SEG=64
+    (2048, 8, 8),   # enc_product=64,  HV_SEG=32
+    (4096, 8, 8),   # enc_product=64,  HV_SEG=64
+    (4096, 8, 16),  # enc_product=128, HV_SEG=32
+]
 
 EXPERIMENTS: List[Dict[str, Any]] = [
-    # ── Group A: EDA strategy impact (all 100 MHz) ───────────────────────────
-    {"group": "A", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "syn_map_effort": "low", "syn_opt_effort": "low"},
-    {"group": "A", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "syn_map_effort": "high", "syn_opt_effort": "high", "enable_retime": "true",
-     "compile_timing_high_effort": "true"},
-    {"group": "A", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "enable_clock_gating": "true", "enable_leakage_optimization": "true",
-     "enable_dynamic_optimization": "true", "compile_ultra_gate_clock": "true"},
-    # DP4: Area aggressive — may trigger gate2_failed (timing_violated) by design
-    {"group": "A", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "max_area_ignore_tns": "true", "compile_area_high_effort": "true",
-     "dp_smartgen_strategy": "area"},
-    # DP5: Max effort timing (omit compile_area_high_effort to avoid DC conflict)
-    {"group": "A", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "syn_map_effort": "high", "syn_opt_effort": "high", "enable_retime": "true",
-     "compile_timing_high_effort": "true", "enable_clock_gating": "true",
-     "enable_leakage_optimization": "true", "enable_dynamic_optimization": "true",
-     "dp_smartgen_strategy": "timing"},
-    # ── Group B: Architecture gradient (all 100 MHz) ──────────────────────────
-    {"group": "B", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "B", "hd_dim": 2048, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 5, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "B", "hd_dim": 4096, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "B", "hd_dim": 4096, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "B", "hd_dim": 4096, "reram_size": 128, "out_channels_1": 16, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(2e8)},
-    # ── Group C: inner_dim gradient (all 100 MHz) ──────────────────────────────
-    {"group": "C", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "C", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8)},
-    {"group": "C", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 4096, "frequency": int(2e8)},
-    # ── Group D: Frequency sweep on small arch (125/150/150 MHz) ──────────────
-    {"group": "D", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "D", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8)},
-    {"group": "D", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "syn_map_effort": "high", "syn_opt_effort": "high", "enable_retime": "true"},
-    # ── Group E: Gate 2 pressure (large arch, 250–300 MHz) ────────────────────
-    # Stress test: large arch 需較高 frequency 以利時序收斂
-    {"group": "E", "hd_dim": 4096, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(2.5e8),
-     "syn_map_effort": "low", "syn_opt_effort": "low", "enable_retime": "false",
-     "compile_timing_high_effort": "false"},
-    {"group": "E", "hd_dim": 4096, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(3e8),
-     "syn_map_effort": "high", "syn_opt_effort": "high", "enable_retime": "true",
-     "compile_timing_high_effort": "true"},
-    {"group": "E", "hd_dim": 4096, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(2.5e8),
-     "syn_map_effort": "low", "syn_opt_effort": "low", "enable_retime": "false",
-     "compile_timing_high_effort": "false"},
-    {"group": "E", "hd_dim": 4096, "reram_size": 256, "out_channels_1": 16, "kernel_size_1": 7,
-     "out_channels_2": 32, "kernel_size_2": 7, "inner_dim": 1024, "frequency": int(3e8),
-     "syn_map_effort": "high", "syn_opt_effort": "high", "enable_retime": "true",
-     "compile_timing_high_effort": "true"},
-    # ── Group F: same small arch (both hd_top for consistency) ─────────────────
-    {"group": "F", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "F", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    # ── Group G: DP 12 retry + extended frequency sweep ───────────────────────
-    # G1: DP 12 retry — same config as original DP 12 (inner_dim=2048 @ 100 MHz)
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    # G2–G6: inner_dim=2048 frequency sweep (80/110/120/125/150 MHz)
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 2048, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    # G7–G8: base arch (oc1=8, oc2=16, inner=1024) @ 80/175 MHz
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    # G9: inner_dim=4096 @ 125 MHz
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 8, "kernel_size_1": 5,
-     "out_channels_2": 16, "kernel_size_2": 3, "inner_dim": 4096, "frequency": int(2e8),
-     "top_module": "hd_top"},
-    # G10: small arch (oc1=4, oc2=8) @ 175 MHz
-    {"group": "G", "hd_dim": 2048, "reram_size": 128, "out_channels_1": 4, "kernel_size_1": 3,
-     "out_channels_2": 8, "kernel_size_2": 3, "inner_dim": 1024, "frequency": int(2e8),
-     "top_module": "hd_top"},
+    {"group": "hd_encoder", "hd_dim": hd, "inner_dim": INNER_DIM, "encoder_x_dim": ex, "encoder_y_dim": ey}
+    for hd, ex, ey in HD_DIM_ENCODER_PAIRS
 ]
 
 
@@ -269,9 +162,9 @@ def run_experiments(
 
         logger.info("=" * 60)
         logger.info(
-            f"[DP {dp}] Group {group} — hd_dim={params['hd_dim']}, "
-            f"reram={params['reram_size']}, inner_dim={params['inner_dim']}, "
-            f"freq={params.get('frequency', 2e8)/1e6:.0f}MHz, top={top_mod}"
+            f"[DP {dp}] Group {group} — hd_dim={params['hd_dim']}, inner_dim={params['inner_dim']}, "
+            f"encoder_x/y=({params['encoder_x_dim']},{params['encoder_y_dim']}), "
+            f"reram={params['reram_size']}, freq={params.get('frequency', 2e8)/1e6:.0f}MHz, top={top_mod}"
         )
 
         record: Dict[str, Any] = {
@@ -287,6 +180,8 @@ def run_experiments(
             "p1_energy_uj": None,
             "p1_timing_us": None,
             "p1_area_mm2": None,
+            "p1_rram_area_mm2": None,
+            "p1_asic_area_mm2": None,
             "p1_elapsed_s": None,
             "p2_area_um2": None,
             "p2_clock_period_ns": None,
@@ -324,6 +219,8 @@ def run_experiments(
         record["p1_energy_uj"] = p1.get("energy_uj")
         record["p1_timing_us"] = p1.get("timing_us")
         record["p1_area_mm2"] = p1.get("area_mm2")
+        record["p1_rram_area_mm2"] = p1.get("rram_area_mm2")
+        record["p1_asic_area_mm2"] = p1.get("asic_area_mm2")
 
         accuracy = p1["accuracy"]
         record["accuracy"] = accuracy
@@ -445,7 +342,7 @@ def run_experiments(
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="32-point differentiated experiment for Path 2/Path 3 validation",
+        description="encoder_x_dim sweep experiment (hd_dim, inner_dim fixed; other params from defaults)",
     )
     parser.add_argument("--path2", action="store_true", help="Enable Path 2 (EDA synthesis)")
     parser.add_argument("--path3", action="store_true", help="Enable Path 3 (gate-level sim)")
@@ -476,7 +373,7 @@ def _parse_args():
         "--output",
         type=str,
         default=None,
-        help="Output JSON file path (default: auto by mode, e.g. dse_32_p1p2p3.json)",
+        help="Output JSON file path (default: auto by mode, e.g. dse_15_p1p2p3.json)",
     )
     return parser.parse_args()
 
@@ -484,10 +381,10 @@ def _parse_args():
 def _default_output_path(use_path2: bool, use_path3: bool) -> str:
     """Auto-generate output filename by mode to avoid overwriting different runs."""
     if use_path3:
-        return "dse_32_p1p2p3.json"
+        return "dse_15_p1p2p3.json"
     if use_path2:
-        return "dse_32_p1p2.json"
-    return "dse_32_p1.json"
+        return "dse_15_p1p2.json"
+    return "dse_15_p1.json"
 
 
 def main():
@@ -498,7 +395,8 @@ def main():
     output_file = args.output or _default_output_path(args.path2, args.path3 and args.path2)
 
     logger.info("=" * 60)
-    logger.info("32-Point Differentiated Experiment")
+    n_exp = len(EXPERIMENTS)
+    logger.info(f"{n_exp}-Point Experiment (hd_dim×encoder_xy pairs, inner_dim={INNER_DIM})")
     logger.info(f"  Path 2: {'ENABLED' if args.path2 else 'DISABLED'}")
     logger.info(f"  Path 3: {'ENABLED' if args.path3 and args.path2 else 'DISABLED'}")
     logger.info(f"  synth_mode={args.synth_mode}, top_module={args.top_module}")
@@ -523,10 +421,10 @@ def main():
     wall_clock_s = round(time.monotonic() - t_start, 2)
     run_end = datetime.now(timezone.utc).isoformat()
 
-    # Ensure exactly 32 data points
-    if len(results) != 32:
+    # Ensure all experiments completed
+    if len(results) != n_exp:
         logger.error(
-            f"INCOMPLETE: expected 32 results, got {len(results)}. "
+            f"INCOMPLETE: expected {n_exp} results, got {len(results)}. "
             "Script may have been interrupted or an experiment crashed."
         )
         sys.exit(1)
@@ -537,7 +435,7 @@ def main():
         s = r.get("status") or "unknown"
         status_counts[s] = status_counts.get(s, 0) + 1
     logger.info("=" * 60)
-    logger.info("Summary: 32/32 experiments completed")
+    logger.info(f"Summary: {len(results)}/{n_exp} experiments completed")
     for status, count in sorted(status_counts.items()):
         logger.info(f"  {status}: {count}")
     logger.info(f"  Wall clock: {wall_clock_s:.1f}s")
@@ -552,7 +450,7 @@ def main():
                     "path3_enabled": args.path3 and args.path2,
                     "synth_mode": args.synth_mode,
                     "top_module": args.top_module,
-                    "total_data_points": 32,
+                    "total_data_points": n_exp,
                     "run_start_iso": run_start,
                     "run_end_iso": run_end,
                     "wall_clock_seconds": wall_clock_s,

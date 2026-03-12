@@ -2,41 +2,34 @@
 
 ## 1.1 研究背景與動機 (Background and Motivation)
 
-隨著人工智慧與物聯網 (IoT) 邊緣運算的蓬勃發展，對高能效、低延遲運算架構的需求日益迫切。傳統范紐曼 (von Neumann) 架構受制於記憶體牆 (Memory Wall)，在大量資料搬移時產生嚴重能耗與延遲。記憶體內運算 (Processing-in-Memory, PIM) 透過在記憶體陣列內部或鄰近處直接執行運算，大幅降低資料搬移，展現極高能效潛力 [1,2]。同時，超維度運算 (Hyperdimensional Computing, HDC) 作為輕量級機器學習典範，具備高度平行性、強容錯能力與簡易訓練流程，被視為邊緣運算的理想演算法 [3]。將 HDC 與 PIM 結合的 HDnn-PIM 架構 [4]，能在極低功耗下實現高效推論與學習，已成為硬體加速器研究的熱門方向。
+隨著人工智慧與邊緣運算的發展，特定領域加速器 (Domain-Specific Accelerators) 的設計需在功耗、效能與面積 (PPA) 等嚴格約束下尋求最佳權衡。現代加速器的最佳化已不再侷限於單一層次，而是需要跨越**軟體演算法**、**硬體架構**與 **EDA 合成策略**的全端聯合探索 (Cross-Layer Co-Design)。然而，要取得真實且具保真度 (High-Fidelity) 的 PPA 數據，必須將硬體 RTL 投入 EDA 工具（如邏輯合成與閘級模擬）中進行迭代評估。這帶來了極高昂的運算成本，使得傳統的設計空間探索 (Design Space Exploration, DSE) 面臨嚴重的評估瓶頸。
 
 ## 1.2 問題陳述與研究缺口 (Problem Statement and Research Gap)
 
-設計最佳化 HDnn-PIM 加速器面臨三層抽象耦合與評估成本雙重挑戰。
+設計最佳化的現代加速器面臨以下雙重挑戰：
 
-**設計空間的多層耦合**：HDnn-PIM 的設計空間橫跨 (i) 軟體演算法層（如超維度向量長度 \(D\)、編碼器內部維度 \(\text{inner\_dim}\)），(ii) 硬體架構層（如 RRAM 陣列大小、處理單元數量），以及 (iii) EDA 合成策略層（如 Design Compiler 的優化旗標）。表 1 概括各層參數對 PPA 的影響。參數間存在非線性耦合：例如增加 \(D\) 可提升準確率，但會導致硬體面積與功耗急遽上升。傳統「先軟體後硬體」的脫節流程難以捕捉此耦合，無法逼近全域 Pareto 最佳解。
+**1. 跨層級設計空間的深度耦合 (Cross-Layer Design Space Coupling)**：
+設計參數橫跨模型層、架構層與合成層，且彼此存在非線性耦合。以表 1 所示之代表性實例為例，增加軟體演算法的模型維度有助於提升準確率，但會引發硬體面積與功耗的急遽上升。傳統「先定軟體、後做硬體」的脫節流程難以捕捉此耦合，無法逼近全域 Pareto 最佳解。
 
+**表 1：跨層級搜尋參數類別與 PPA 影響（以 HDnn-PIM 為代表性實例）**
 
-**表 1：HDnn-PIM 設計空間參數分類與 PPA 影響**
-
-| 設計抽象層 | 關鍵設計參數 | 對 PPA 之影響 |
+| 抽象層級 (Abstraction Level) | 代表性設計參數 (Representative Parameters) | 對 PPA 與約束的影響 (Impact on PPA & Constraints) |
 | :--- | :--- | :--- |
-| 軟體演算法 | \(D\) (hd_dim)、inner_dim、out_channels、kernel_size | 準確率 (Accuracy)；與硬體資源呈非線性耦合 |
-| 硬體架構 | reram_size、encoder_x/y_dim、frequency | 面積 (Area)、功耗 (Power)、效能 (Timing) |
-| EDA 合成策略 | enable_retime、syn_map_effort、enable_clock_gating、dp_smartgen_strategy 等 | 面積、功耗、效能；細粒度旗標可動態調整優化方向 |
+| **Model / Software** | \(D\) (hd_dim)、inner_dim、out_channels | 決定軟體準確率門檻；與硬體資源呈非線性耦合 |
+| **Hardware Architecture** | reram_size、encoder_x/y_dim、frequency | 直接決定硬體的面積 (Area)、功耗 (Power) 與效能 (Timing) |
+| **EDA Synthesis Strategy** | enable_retime、syn_map_effort、enable_clock_gating | 透過細粒度旗標動態調控合成最佳化方向 |
 
-**高昂的評估成本**：取得精確 PPA 需將 RTL 送入 EDA 工具進行邏輯合成與閘級模擬。以 HDnn-PIM 為例，單次邏輯合成約需 30–60 分鐘、閘級模擬約需 10–30 分鐘，設計空間涵蓋軟硬體與 EDA 參數的組合可達 \(10^5\) 量級以上。在如此高維且昂貴的評估情境下，窮舉或隨機搜尋在實務上不可行。
+**2. 缺乏可重複利用的多保真度評估流程 (Lack of Reusable Multi-Fidelity Orchestration)**：
+在動輒數萬種組合的高維搜尋空間中，若對每組設計皆執行完整的 RTL 邏輯合成（約 30–60 分鐘）與閘級模擬（10–30 分鐘），將耗費龐大成本。現有研究缺口在於：部分文獻專注於軟硬體聯合設計但**僅依賴純軟體分析模型** [@parashar2019timeloop; @andrulis2024cimloop]，無法反映真實的時序違例與佈線後面積；另一部分文獻專注於 EDA 參數調校卻**未與頂層演算法聯合最佳化** [@sun2022correlated; @zheng2023boosting]。目前領域內仍缺乏一個能有效協調軟體篩選、RTL 合成與閘級驗證的**可配置多保真度流程 (Configurable Multi-Fidelity Flow)**。
 
-**研究缺口**：既有文獻或專注於軟硬體參數但忽略 EDA 策略 [5,6]，或專注於 EDA 調校卻未與軟體演算法聯合優化 [7,8]。此外，缺乏能從根本上加速 RTL 評估的機制，導致高維 DSE 仍受困於時間瓶頸。
+## 1.3 提出的方法論與貢獻 (Proposed Methodology and Contributions)
 
-## 1.3 研究目標 (Research Objectives)
+為了解決上述流程層級 (Flow-Level) 的缺口，本研究提出一套**自動化、多保真度且高度可配置的全端協同設計框架 (Customizable Full-Stack Co-Design Framework)**。為驗證框架於高度耦合問題上的效力，我們選擇結合超維度運算與記憶體內運算的 **HDnn-PIM** [@dutta2022hdnn] 作為代表性驗證平台 (Validation Case Study)。本框架的核心設計邏輯為**可配置性 (Customizability)**，本文主要貢獻如下：
 
-基於上述挑戰，本研究設定以下目標：(1) 建立可修改的全端軟硬體與 EDA 聯合協同設計流程，使優化器、評估管道與資料來源均可依需求替換；(2) 設計具閘級保真度的多層次評估管道，透過邏輯合成取得 PPA、閘級模擬獲得最精確的執行時間，並以提早停止機制降低無效評估；(3) 將 EDA 細粒度合成旗標納入搜尋空間，驗證聯合探索能有效推動 Pareto 邊界極限。
+1. **可配置的跨層級參數化流程 (Configurable Cross-Layer Parameterization Flow)**：打破單一抽象層界線，將模型層參數、硬體架構參數以及底層 EDA 合成旗標（如 enable_retime 等 13+ 項參數）整合至單一最佳化介面。
+2. **具守門機制的多保真度評估管道 (Gated Multi-Fidelity Evaluation Methodology)**：建立「軟體模擬 → 邏輯合成 → 閘級模擬」三階段評估管道。利用軟體準確率與硬體時序違例作為守門機制 (Gatekeeping) 提早淘汰不良設計，極大化昂貴 RTL 評估的價值。
+3. **閉環內的 EDA 協調與高保真度反饋 (EDA-in-the-Loop Orchestration)**：提出遠端 EDA 協調機制，使得繁重的 RTL 合成與閘級模擬能無縫整合入反覆運算的搜尋迴圈中；其中 Path 3 更採用真實閘級波形進行功耗預測，大幅消除了純軟體模擬的準確度落差。
 
-## 1.4 本文貢獻 (Contributions)
+## 1.4 論文組織 (Paper Organization)
 
-為解決上述挑戰，本研究提出一套**自動化、多層次保真度且可修改的全端協同設計框架**，以 HDnn-PIM 為實例驗證，其可修改性使流程可擴展至其他 AI 演算法的軟硬體協同優化。**核心設計邏輯為可修改性**：優化器、評估管道與資料來源均可依需求替換，不受限於特定演算法。本文主要貢獻如下：
-
-1. **可修改的全端軟硬體與 EDA 聯合流程**：打破軟硬體設計藩籬，將 HDC 演算法參數、PIM 陣列架構參數與 Synopsys Design Compiler 細粒度合成旗標整合至單一搜尋空間；流程支援修改資料來源與優化目標，可實現全域 Pareto 優化。
-
-2. **可修改的多層次保真度評估與提早停止機制**：建立「軟體模擬 → 邏輯合成 → 閘級模擬」三階段評估管道，以軟體準確率作為 Gate 1 提早淘汰不達標設計、以時序違例作為 Gate 2 過濾不可實作架構；門檻與階段可依資料與約束修改，並採用黑盒子快速合成、EDA 細粒度旗標探索等技巧，大幅節省無效合成。**Path 3 閘級模擬依實際波形 toggle 行為進行 PrimeTime PX 功耗分析，預測準確度遠優於軟體模擬與合成後靜態功耗分析**。此外，利用合成報告的 slack time 快速優化 frequency，可獲得更精準的執行時間與功耗預估。
-
-3. **EDA 細粒度旗標探索**：將 Design Compiler 的 13+ 項細粒度合成旗標（如 enable_retime、enable_clock_gating、compile_timing_high_effort 等）參數化納入搜尋空間，實驗證實動態決策合成策略能有效推動 Pareto 邊界極限。
-
-## 1.5 論文組織 (Paper Organization)
-
-本文其餘部分組織如下：第 2 節回顧 HDC、PIM 與設計空間探索相關工作；第 3 節詳述框架架構、評估管道與 EDA 策略探索；第 4 節說明實驗設定並呈現結果；第 5 節討論實驗意涵與限制；第 6 節總結並展望未來工作。
+本文其餘部分組織如下：第 2 節透過 HDnn-PIM 案例介紹跨層耦合挑戰與相關工作；第 3 節詳述所提多保真度評估流程的架構與 EDA 策略探索；第 4 節說明實驗設定並呈現結果；第 5 節討論實驗意涵、需改進之處與未來工作，並總結全文。

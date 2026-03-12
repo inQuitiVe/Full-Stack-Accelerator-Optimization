@@ -6,10 +6,12 @@ output into the canonical metrics format used by the BO engine.
 
 Canonical output (raw, before normalisation):
   {
-    "accuracy":     float,  # 0.0 ~ 1.0
-    "energy_uj":    float,  # uJ  (asic_energy + rram_energy)
-    "timing_us":    float,  # us  (asic_delay + rram_delay, sequential)
-    "area_mm2":     float,  # mm^2 (asic_area + rram_area)
+    "accuracy":        float,  # 0.0 ~ 1.0
+    "energy_uj":       float,  # uJ  (asic_energy + rram_energy)
+    "timing_us":       float,  # us  (asic_delay + rram_delay, sequential)
+    "area_mm2":        float,  # mm^2 (asic_area + rram_area)
+    "rram_area_mm2":   float | None,  # mm^2 RRAM area only
+    "asic_area_mm2":   float | None,  # mm^2 ASIC (CNN+encoder) area only
   }
 
 Additionally exposes dump_hex_data() for Path 3 (Gate-Level Simulation).
@@ -113,9 +115,15 @@ def evaluate_path1(
     timing_us: float = result["performance"][0] * _BASE
     area_mm2: float = result["area"][0] * _BASE
 
+    # 個別 area（CiMLoop 儲存）
+    cimloop = evaluator.metric_managers[0] if evaluator.metric_managers else None
+    rram_area_mm2 = getattr(cimloop, "_rram_area_mm2", None) if cimloop else None
+    asic_area_mm2 = getattr(cimloop, "_asic_area_mm2", None) if cimloop else None
+
     _log.info(
         f"[Path1] accuracy={accuracy:.4f}, energy={energy_uj:.3f}uJ, "
-        f"timing={timing_us:.3f}us, area={area_mm2:.4f}mm^2"
+        f"timing={timing_us:.3f}us, area={area_mm2:.4f}mm^2 "
+        f"(asic={asic_area_mm2 or 0:.4f}, rram={rram_area_mm2 or 0:.4f})"
     )
 
     # Cache hd_model for Path 2 RRAM Cimloop (same as dump_hex_data)
@@ -132,6 +140,8 @@ def evaluate_path1(
         "energy_uj": energy_uj,
         "timing_us": timing_us,
         "area_mm2": area_mm2,
+        "rram_area_mm2": rram_area_mm2,
+        "asic_area_mm2": asic_area_mm2,
         "hd_model": hd_model,
     }
 

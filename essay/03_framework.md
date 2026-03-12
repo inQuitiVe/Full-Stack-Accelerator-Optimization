@@ -8,6 +8,8 @@
 
 **設計動機**：商用 EDA 工具（如 Synopsys Design Compiler、VCS）受授權與內網限制，難以與 Python/Docker 型 BO 框架直接綁定；且單次邏輯合成與閘級模擬耗時可觀（約 30–60 分鐘與 10–30 分鐘）。為此，我們採用 **Thin-Client 解耦架構**：Client 將參數打包為 JSON 發送至遠端 EDA Server；Server 動態產生 RTL 巨集與合成腳本，驅動 DC 合成與 VCS 模擬，並僅回傳數值化 PPA 指標。此架構解決授權問題，並具備高擴充性。
 
+![圖 3-1：Thin-Client 全端 DSE 框架架構。Client 將參數打包為 JSON 發送至 EDA Server，Server 執行邏輯合成與閘級模擬後回傳 PPA 指標。](images/Framework.png)
+
 **形式化定義**：設計空間 \(\mathcal{X}\) 涵蓋軟體參數（如 \(D\)、\(\text{inner\_dim}\)、out_channels）、硬體參數（reram_size、encoder_x/y_dim、frequency）與 EDA 合成旗標。單次評估 \(e(\mathbf{x})\) 依提早停止條件分階段執行：
 
 - **Gate 1**：\(\text{Accuracy}(\mathbf{x}) \geq \tau\)；若不滿足，\(e(\mathbf{x})\) 終止，**完全跳過硬體合成**。
@@ -37,11 +39,15 @@ A_{\text{total}} = A_{\text{ASIC}} + A_{\text{RRAM}}, \quad T_{\text{total}} = T
 
 **Gate 2**：若合成網表發生時序違例（Slack \(< 0\)），該 Trial 判定失敗，Path 3 不觸發。
 
+![圖 3-2：Server 端 Path 2 邏輯合成日誌範例](images/server_path2_log.png)
+
 ### 3.1.3 Path 3：閘級模擬與功耗驗證 (High Fidelity)
 
 Path 3 僅在「通過 Gate 2 且使用者啟用 Path 3」時觸發。Server 於合成完成且無違例後執行 VCS 閘級模擬與 PrimeTime PX 功耗分析。**Path 3 的核心優勢在於功耗預測準確度**：VCS 閘級模擬產生實際波形，PtPX 依此 toggle 行為進行動態功耗分析，相較於 Path 1 的軟體能量估算與 Path 2 合成報告的靜態功耗分析，Path 3 能捕捉真實電路切換活動，預測準確度顯著較高。
 
 **LFSR-based Testbench 設計動機與驗證**：傳統做法需從 PyTorch 傳輸大量 `.hex` 測試資料至 EDA Server，造成網路負擔與授權環境限制。我們採用 **LFSR 自產生測試平台**，在 Server 端本地產生 pseudo-random 刺激，精確記錄 ENC_PRELOAD → oFIFO 的 **COMPUTE CYCLES**，並產生 SAIF 供 PtPX 使用。LFSR 產生的 toggle 模式涵蓋典型推論 workload 的電路切換行為；其代表性經由與 golden 測試向量比對驗證，確保週期計數與功耗分析具正確性。Testbench 支援 `inner_dim` 驅動的 `N_WEIGHT_WORDS` 與 10 classes（MNIST/CIFAR-10）。
+
+![圖 3-3：Server 端 Path 3 閘級模擬日誌範例](images/server_path3_log.png)
 
 **Path 3 指標拼接公式**：
 
@@ -181,15 +187,27 @@ BO 搜尋空間由**搜尋空間定義檔**指定；**參數轉換模組**負責
 
 ## 附錄 A：通訊協定與檔案路徑 (Appendix A: Protocol and File Paths)
 
-**Socket 協定**：TCP，預設 PORT=5000。訊息以 newline 結尾的 JSON 傳輸。Client 發送 `{"action": "submit", "job_id": <int>, "params": {...}, "run_path3": true|false}`；Server 回覆 `{"job_id": <int>, "status": "accepted"}`。Client 以 `{"action": "status", "job_id": <int>}` 輪詢；Server 回覆 `{"job_id": <int>, "status": "queued"|"running"|"success"|"error"|"timeout"|"timing_violated", "metrics": {...}, "reason": "..."}`。
+本附錄說明 Client-Server 通訊協定與相關檔案路徑，供實作參考。
+
+### A.1 Socket 協定
+
+TCP，預設 PORT=5000。訊息以 newline 結尾的 JSON 傳輸。Client 發送 `{"action": "submit", "job_id": <int>, "params": {...}, "run_path3": true|false}`；Server 回覆 `{"job_id": <int>, "status": "accepted"}`。Client 以 `{"action": "status", "job_id": <int>}` 輪詢；Server 回覆 `{"job_id": <int>, "status": "queued"|"running"|"success"|"error"|"timeout"|"timing_violated", "metrics": {...}, "reason": "..."}`。
+
+![圖 A-1：Client-Server 通訊協定示意。Client 以 TCP Socket 傳輸 JSON 輪詢，Server 回傳任務狀態與 PPA 指標。](images/socket.png)
+
+### A.2 Server 端關鍵檔案與輸出
 
 **Server 端關鍵檔案**：任務佇列主程式、參數轉換腳本、DC 慢速/快速合成模板、動態產生的 synth_dse.tcl、Makefile、DC/VCS 報告解析器。
 
 **參數轉換輸出**：RTL 巨集檔（config_macros.svh）、Testbench 常數檔（tb_macros.svh）、注入 clock/TOP_MODULE/合成旗標後的 synth_dse.tcl。
 
-**Client 端關鍵檔案**：Path 1 軟體評估器、Path 2/3 硬體評估器、EDA 客戶端、搜尋空間定義檔（cimloop.yaml）。
+### A.3 Client 端關鍵檔案
 
-**LFSR Testbench 完整指令序列**：
+Path 1 軟體評估器、Path 2/3 硬體評估器、EDA 客戶端、搜尋空間定義檔（cimloop.yaml）。
+
+![圖 A-2：Client 端輪詢與任務提交日誌範例。](images/client_full_log.png)
+
+### A.4 LFSR Testbench 完整指令序列
 
 | 階段 | 指令 | 資料 | 目的 |
 | :--- | :--- | :--- | :--- |

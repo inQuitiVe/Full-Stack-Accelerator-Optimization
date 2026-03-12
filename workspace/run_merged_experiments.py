@@ -154,7 +154,7 @@ def main():
     )
     parser.add_argument("--path2", action="store_true", help="Enable Path 2 (EDA synthesis)")
     parser.add_argument("--path3", action="store_true", help="Enable Path 3 (gate-level sim)")
-    parser.add_argument("--eda-host", type=str, default="EDA_SERVER_IP", help="EDA Server host")
+    parser.add_argument("--eda-host", type=str, default="132.239.17.21", help="EDA Server host")
     parser.add_argument("--eda-port", type=int, default=5000, help="EDA Server port")
     parser.add_argument(
         "--synth-mode",
